@@ -1,0 +1,3106 @@
+---
+title: "Pollinators_SelDetection_GEA"
+subtitle: "Outlier Detection and Genotype-Environment Association Analyses with *Baypass* for the *Pollinators* RADseq dataset"
+format: 
+  html:
+    theme: flatly
+    grid:
+      margin-width: 100px
+    toc: true
+    toc-float: true
+    toc-location: left
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-overflow: wrap
+    self-contained: true
+execute:
+  warning: false
+  cache: true
+include-in-header:
+  - text: |
+      <style>
+      .cell-output-stdout code {
+        word-break: break-wor !important;
+        white-space: pre-wrap !important;
+      }
+      </style>
+---
+  
+# SETUP
+  
+## Choose packages
+  
+```{R}
+packages <- c(
+  "tidyverse",
+  "janitor",
+  "gtools",
+  "ggVennDiagram",
+  "rCNV",
+  "vcfR",
+  "corrplot",
+  "FactoMineR",
+  "factoextra",
+  "ape",
+  "parallel",
+  "gt",
+  "gtsummary",
+  "ggVennDiagram",
+  "zoo",
+  "ggVennDiagram"
+)
+```
+
+## Load packages
+  
+```{r}
+invisible(
+  lapply(
+    packages,
+    require,
+    character.only = TRUE
+  )
+)
+```
+
+## Source scripts
+  
+```{r}
+#| cache: false
+invisible(
+  lapply(
+    list.files(
+      c("functions/", "wrapper_functions/"),
+      full.names = TRUE
+    ),
+    source
+  )
+)
+```
+
+# LOAD INPUT
+
+## Define the location of the input files
+
+```{r}
+# location of VCF dataset
+vcf_location <- c(
+  AND = "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/AND_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.vcf.gz", 
+  BOM = "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/BOM_stk_rm_kinship_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.vcf.gz",
+  LGL = "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/LML_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.vcf.gz"
+)
+
+# location of txt file with sample/population information
+pop_ind_file_location <- c(
+  AND = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/AND_structure_popfile.txt", 
+  BOM = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/BOM_structure_popfile.txt",
+  LGL = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/LGL_structure_popfile.txt"
+)
+
+# location of file with population geographical coordinates
+pop_coords_location <- "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/00_sampling_metadata/ALL_samples_metadata_complete.csv"
+```
+
+## Load input data
+
+```{r}
+# load VCF using rCNV::readVCF (for genotyping file conversion)
+vcf_rcnv_datasets <- lapply(vcf_location, readVCF)
+
+# load VCF using vcfR::read.vcfR (to write final datasets)
+vcf_vcfr_dataset <- lapply(vcf_location, read.vcfR)
+
+# load sample/population info file
+pop_ind_table <- lapply(
+  pop_ind_file_location, 
+  \(x) read.delim(x, header = F, col.names = c("sample", "population"))
+  )
+
+# load population/sampling location coordinates
+#pop_coordinates <- read.csv(pop_coords_location, sep = ",", col.names = c("Sample", "Location", "Latitude", "Longitude"))
+```
+
+## Define other parameters
+
+```{R}
+contrast_key <-
+  data.frame(
+    CONTRAST = as.character(1:3),
+    ContrastName = c(
+      "SSF x LoA",
+      "SSF x LoA_N",
+      "SSF x LoA_F"
+    )
+  ) %>% 
+  mutate(
+    ContrastName = fct_relevel(
+      ContrastName,
+      c(
+        "SSF x LoA",
+      "SSF x LoA_N",
+      "SSF x LoA_F"
+        )
+      )
+    )
+
+contrast_key
+```
+
+
+# PREPARING INPUT FILES
+
+## Genotyping file formatting
+
+Convert VCF data into `.baypass` format (two allele count columns per sampling location, each row a SNP) using funtions `genotypeTable()` and `gt.format()` from package `rCNV`.
+
+```{r}
+#| output: false
+# extract genotype table using rCNV::hetTgen
+genotype_tables <- lapply(
+  vcf_rcnv_datasets,
+  \(x) hetTgen(x, "GT")
+  )
+
+# transform genotype table into .baypass
+baypass_gen_data <- lapply( 
+  set_names(c("AND", "BOM", "LGL"), c("AND", "BOM", "LGL")),
+  \(x) gt.format(genotype_tables[[x]], pop_ind_table[[x]], format = "bpass")
+  )
+
+```
+
+Check if *BayPass* table was formatted correctly.
+
+```{r}
+# number of rows should match the number of SNPs in the dataset
+# number of columns should be twice the number of sampling locations
+dim(baypass_gen_data[["AND"]]$baypass)
+dim(baypass_gen_data[["BOM"]]$baypass)
+dim(baypass_gen_data[["LGL"]]$baypass)
+
+# check if column names are in correct order
+# this order must match that in the env file!
+colnames(baypass_gen_data[["AND"]]$baypass)
+colnames(baypass_gen_data[["BOM"]]$baypass)
+colnames(baypass_gen_data[["LGL"]]$baypass)
+```
+
+## Write *BayPass* input files
+
+### Genetic data
+
+```{r}
+# write a table with population and loci info
+# (this wont be used in the analysis)
+write_tsv(
+  as.data.frame(baypass_gen_data[["AND"]]$baypass) %>%
+    rownames_to_column("Locus"),
+  "01_intermediate_files/AND_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.tsv"
+)
+
+write_tsv(
+  as.data.frame(baypass_gen_data[["BOM"]]$baypass) %>%
+    rownames_to_column("Locus"),
+  "01_intermediate_files/BOM_stk_rm_kinship_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.tsv"
+)
+
+write_tsv(
+  as.data.frame(baypass_gen_data[["LGL"]]$baypass) %>%
+    rownames_to_column("Locus"),
+  "01_intermediate_files/LML_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.tsv"
+)
+
+# write the .baypass file with the correct formatting
+write_delim(
+  as.data.frame(baypass_gen_data[["AND"]]$baypass),
+  "01_intermediate_files/AND_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.baypass",
+  col_names = F,
+  delim = " "
+)
+
+write_delim(
+  as.data.frame(baypass_gen_data[["BOM"]]$baypass),
+  "01_intermediate_files/BOM_stk_rm_kinship_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.baypass",
+  col_names = F,
+  delim = " "
+)
+
+write_delim(
+  as.data.frame(baypass_gen_data[["LGL"]]$baypass),
+  "01_intermediate_files/LML_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.baypass",
+  col_names = F,
+  delim = " "
+)
+```
+
+# RUN *BAYPASS*
+
+Run`Baypass`, using the XtXst and C2 statistics.
+
+# ANDRENA FLAVIPES
+
+### Core model analysis
+
+#### Setup Baypass run
+
+```{r}
+AND_baypass_setup_info <- baypass_run_setup(
+  executable_path = "/home/dau2/software/baypass_public-master_3.0/sources/g_baypass",
+  baypass_utils_path = "/home/dau2/software/baypass_public-master_3.0/utils/baypass_utils.R",
+  popfile_path = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/AND_popmap_baypass.txt",
+  envfile_path = "contrast_files/AND_contrast_file.txt",
+  contrast_path = "contrast_files/AND_contrast_file.txt",
+  genofile_path = "01_intermediate_files/AND_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.baypass",
+  output_path = "2_BAYPASS_output/",
+  run_prefix = "AND_run_baypass_300bp",
+  n_pops = 13,
+  seeds = "7357",
+  thread_number = 8
+)
+```
+
+Store setup information.
+
+```{r}
+saveRDS(
+  AND_baypass_setup_info,
+  "03_results/R_data/AND_run_baypass_300bp.RDS.bz2",
+  compress = "bzip2"
+  )
+```
+
+AND SNP metadata.
+
+```{R}
+AND_SNP_metadata <- 
+  vcf_vcfr_dataset[["AND"]]@fix %>% 
+  as.data.frame() %>% 
+  select(CHROM, POS) %>% 
+  mutate(
+    MRK = 1:nrow(.),
+    CHROM_number = as.double(str_extract(CHROM, "\\d")),
+    CHROM_color = case_when(
+      CHROM_number %% 2 == 0 ~ "even",
+      .default = "odd"
+      )
+    )
+```
+
+
+#### Run analysis
+
+Run core model using wrapper function `core_mode_wrapper()`:
+
+```{r}
+AND_core_mode_results <- 
+  core_mode_wrapper(AND_baypass_setup_info, skip_baypass = T)
+```
+
+#### Source Baypass utils
+
+```{R}
+source(AND_baypass_setup_info$paths$baypass_utils_path)
+```
+
+### Check p-value behaviour
+
+We need to check if the p-values are well-behaved or not.
+
+If not, we need to run the POD calibration as described in the BayPass v.3.0. manual.
+
+#### XtXst estimator
+
+Visualize the estimates of the XtXst differentiation measures.
+
+Check behavior of the p-values associated to the XtXst estimator.
+
+```{r}
+lapply(
+  AND_baypass_setup_info$run_info$seeds,
+  \(x) AND_core_mode_results[["xtx_estimator"]][[x]] %>% 
+    ggplot(aes(x = 10**(-1 * log10.1.pval.), y = ..density..)) +
+    geom_histogram(bins = 50, boundary = 0) +
+    geom_hline(yintercept = 1) +
+    ggtitle(paste("Seed", x))
+  )
+
+```
+
+##### [OPTIONAL] Correcting for multiple testing
+
+When correcting for multiple testing, p-values should be converted in q-values
+
+Setting FDR (False Discovery Rate) = 0.05 or 0.01
+
+```{r}
+AND_xtx_qvalues <-
+  lapply(
+    AND_baypass_setup_info$run_info$seeds,
+    \(x) AND_core_mode_results[["xtx_estimator"]][[x]] %>% 
+      mutate(pval =  10**(-1 * log10.1.pval.)) %>% 
+      pull(pval) %>% 
+      qvalue(fdr.level = 0.05)
+    )
+```
+
+Print the summary for every seed
+
+```{r}
+invisible(
+  Map(
+    \(seed, qobj) {
+      cat("\n#####  Seed:", seed, "#####\n")
+      print(summary(qobj))
+      },
+      AND_baypass_setup_info$run_info$seeds,   # names / labels
+      AND_xtx_qvalues                          # corresponding q-value objects
+    )
+  )
+```
+
+#### C2 statistic
+
+```{R}
+# Open PDF device
+pdf("03_results/Contrast_analysis/AND/AND_C2_pvalue_histograms_300bp.pdf", width = 8, height = 12)
+
+# Loop through each seed and print the plot
+invisible(
+  lapply(
+    AND_baypass_setup_info$run_info$seeds,
+    function(x) {
+      p <- AND_core_mode_results[["contrast"]][[x]] %>% 
+        ggplot(aes(x = 10^(-1 * log10.1.pval.), y = ..density..)) +
+        geom_histogram(bins = 50, boundary = 0) +
+        geom_hline(yintercept = 1) +
+        facet_wrap(~CONTRAST, ncol = 1) +
+        ggtitle(paste("Seed", x))
+      
+      print(p)
+    }
+  )
+)
+
+# Close PDF device
+dev.off()
+```
+
+##### [OPTIONAL] Correcting for multiple testing
+
+When correcting for multiple testing, p-values should be converted in q-values
+
+Setting FDR (False Discovery Rate) = 0.05 or 0.01
+
+```{R}
+AND_c2_qvalues <-
+lapply(
+  AND_baypass_setup_info$run_info$seeds,
+  \(x) AND_core_mode_results[["contrast"]][[x]] %>% 
+    mutate(pval =  10**(-1 * log10.1.pval.)) %>% 
+    pull(pval) %>% 
+    qvalue()
+  )
+```
+
+Print the summary for every seed
+
+```{r}
+invisible(
+  Map(
+    \(seed, qobj) {
+      cat("\n#####  Seed:", seed, "#####\n")
+      print(summary(qobj))
+      },
+      AND_baypass_setup_info$run_info$seeds,   # names / labels
+      AND_c2_qvalues                          # corresponding q-value objects
+    )
+  )
+```
+
+## Simulate the POD dataset
+
+```{r}
+
+# Estimate beta parameters for the Pi distribution
+AND_pi_beta <- AND_core_mode_results$pi_beta_coef[["7357"]]$Mean
+
+# Extract allele counts from your original .baypass genotype file
+AND_allele_data <- geno2YN(AND_baypass_setup_info$paths$genofile)
+
+# Simulate 30,000 SNPs based on the estimated parameters
+simulate.baypass(
+  omega.mat = AND_core_mode_results$omega_matrix[["7357"]],
+  nsnp = 68799,
+  sample.size = AND_allele_data$NN,
+  beta.pi = AND_pi_beta,
+  pi.maf = 0,
+  suffix = "AND_POD_mac2_300bp_window"
+)
+```
+
+#### Set up the BayPass POD run
+
+```{r}
+
+AND_POD_setup_info <- baypass_run_setup(
+  executable_path = "/home/dau2/software/baypass_public-master_3.0/sources/g_baypass",
+  baypass_utils_path = "/home/dau2/software/baypass_public-master_3.0/utils/baypass_utils.R",
+  popfile_path = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/AND_popmap_baypass.txt",
+  envfile_path = "contrast_files/AND_contrast_file.txt",
+  contrast_path = "contrast_files/AND_contrast_file.txt",
+  genofile_path = "2_BAYPASS_output/AND_POD_run_analysis_output/0_core_mode_output/G.AND_POD_mac2_300bp_window",
+  output_path = "2_BAYPASS_output/AND_POD_run_analysis_output/0_core_mode_output/seed_7357_mac2_300bp_window/",
+  run_prefix = "AND_POD_mac2_300bp_window_run",
+  n_pops = 13,
+  seeds = "7357",
+  thread_number = 8
+)
+```
+
+#### Save the setup
+
+```{r}
+
+saveRDS(
+  AND_POD_setup_info,
+  "03_results/R_data/AND_POD_mac2_300bp_window_run_setup.RDS.bz2",
+  compress = "bzip2"
+)
+```
+
+#### Run BayPass on the POD dataset
+
+```{r}
+
+AND_POD_results <- core_mode_wrapper(AND_POD_setup_info , skip_baypass = F)
+
+```
+
+#### Extract 99th percentile XtXst thresholds per seed
+
+```{r}
+
+AND_POD_xtxst_thresholds <- lapply(
+  AND_POD_results$xtx_estimator,
+  \(df) quantile(df$XtXst, probs = 0.99)
+) %>% unlist()
+
+# Name the vector (should already be named if your object is correct)
+names(AND_POD_xtxst_thresholds)
+```
+
+#### Extract 99th percentile C2 thresholds per seed
+
+```{r}
+AND_POD_C2_thresholds <- setNames(
+  sapply(
+    AND_baypass_setup_info$run_info$seeds,
+    \(x) quantile(AND_POD_results[["contrast"]][[x]][["C2"]], probs = 0.99)
+  ),
+  AND_baypass_setup_info$run_info$seeds
+)
+
+```
+
+#### Extract 99th percentile BF thresholds per seed
+
+```{R}
+AND_POD_BF_thresholds <- setNames(
+  sapply(
+    AND_baypass_setup_info$run_info$seeds,
+    \(x) quantile(AND_POD_results[["betai_reg"]][[x]]$BF.dB., probs = 0.99, na.rm = TRUE)
+  ),
+  AND_baypass_setup_info$run_info$seeds
+)
+```
+
+
+### Analyze `Baypass` results
+
+#### Check convergence of the covariance matrix
+
+Calculate correlation between the posterior means of the estimated Omega matrix elements across independent runs.
+
+```{R}
+AND_core_mode_results$lda_omega %>% 
+  bind_rows(.id = "seed") %>%
+  mutate(comparison = paste0(I, " - ", J)) %>% 
+  select(comparison, seed, M_omega_ij) %>% 
+  pivot_wider(names_from = seed, values_from = M_omega_ij) %>% 
+  column_to_rownames("comparison") %>% 
+  cor() 
+```
+
+Visualize covariance matrix using SVD decomposition:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+plot.omega(
+  omega = AND_core_mode_results[["omega_matrix"]][["7357"]],
+  pop.names = AND_core_mode_results[["pop_names"]]
+)
+```
+
+Visualize covariance matrix as a correlation plot:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+# Convert to correlation matrix
+corr_mat <- cov2cor(
+  AND_core_mode_results[["omega_matrix"]][["7357"]]
+)
+
+# Plot correlation
+corrplot(
+  corr_mat,
+  method = "color",
+  mar = c(2, 1, 2, 2) + 0.1,
+  main = expression("Correlation map based on" ~ hat(Omega))
+)
+```
+
+Visualize covariance matrix as a heatmap:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+heatmap(
+  1 - corr_mat,
+  hclustfun = \(x) hclust(x, method = "average"),
+  main = expression("Heatmap of " ~ hat(Omega) ~ "(" * d[ij] * "=1-" * rho[ij] * ")")
+)
+```
+
+Visualize covariance matrix as hierarchical clustering tree:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+plot(
+  as.phylo(
+    hclust(
+      as.dist(1 - corr_mat**2)
+    )
+  ),
+  type = "p",
+  main = expression(
+    "Hier. clust. tree based on" ~ hat(Omega) ~ "(" * d[ij] * "=1-" * rho[ij] * ")"
+  )
+)
+```
+
+#### XtXst estimator
+
+##### XtXst outliers
+
+Visualize the outliers from the XtXst in the original data using the calculated qvalues.
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+fdr_thresh <- 0.01
+
+pdf("03_results/graphs/XtX/AND_XtXst_Manhattan_plots", width = 15, height = 10)
+
+# Loop through all seeds and plot
+invisible(
+  lapply(
+    AND_baypass_setup_info$run_info$seeds,
+    function(seed) {
+      # 1. Get SNP table
+      snp_data <- AND_core_mode_results[["xtx_estimator"]][[seed]]
+      
+      # 2. Get qvalue object for this seed
+      qobj <- AND_xtx_qvalues[[seed]]
+      
+      # 3. Add q-values and outlier flag to SNP table
+      snp_data <- snp_data %>%
+        mutate(
+          qval = qobj$qvalues,
+          log10qval = -log10(qval),
+          is_outlier = case_when(
+            qval <= fdr_thresh ~ "outlier",
+            .default = "not outlier"
+          )
+        ) %>%
+        left_join(AND_SNP_metadata, by = "MRK")
+      
+      # 4. Create and print the plot to the PDF
+      print(
+        ggplot(snp_data, aes(x = MRK, y = log10qval, color = CHROM_color, size = is_outlier)) +
+          geom_point() +
+          geom_hline(yintercept = -log10(fdr_thresh), linetype = "dashed", color = "grey30") +
+          scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+          scale_size_manual(values = c("outlier" = 2, "not outlier" = 1)) +
+          labs(
+            title = paste("XtX q-values (Seed", seed, ")"),
+            x = "SNP (MRK)",
+            y = expression(-log[10](q~value))
+          ) +
+          guides(color = "none", size = "none") +
+          theme_minimal() +
+          theme(panel.grid = element_blank())
+      )
+    }
+  )
+)
+
+# Close the PDF
+dev.off()
+```
+
+##### Extract outliers in a list
+
+```{r}
+
+AND_xtxst_outliers_per_seed <- lapply(
+  names(AND_xtx_qvalues),
+  function(seed) {
+    qobj <- AND_xtx_qvalues[[seed]]
+    real_data <- AND_core_mode_results$xtx_estimator[[seed]]
+    real_data$MRK[qobj$qvalues <= fdr_thresh]
+  }
+) %>% setNames(names(AND_xtx_qvalues))
+
+AND_xtxst_common_outliers <- Reduce(intersect, AND_xtxst_outliers_per_seed)
+length(AND_xtxst_common_outliers)
+
+pdf("03_results/graphs/XtX/AND_XtXst_outliers_VennDiagram.pdf", width = 10, height = 8)
+
+print(
+  ggVennDiagram(
+    AND_xtxst_outliers_per_seed, 
+    label = "count",
+    label_geom = "text",
+    label_color = "white"
+  ) +
+    labs(title = "Overlap of XtXst Outliers (q-value ≤ 0.01) Across Seeds")
+)
+
+dev.off()
+```
+
+#### C2 Statistic
+
+##### Check convergence of the covariance matrix
+
+Calculate correlation between C2 statistics of different runs.
+
+```{R}
+AND_core_mode_results$contrast %>% 
+  bind_rows(.id = "seed") %>%
+  mutate(comparison = paste0(CONTRAST, " - ", MRK)) %>% 
+  select(comparison, seed, C2) %>% 
+  pivot_wider(names_from = seed, values_from = C2) %>% 
+  column_to_rownames("comparison") %>% 
+  cor() 
+```
+
+##### C2 outliers
+
+Extract outliers by keeping only those above the threshold in every seed.
+
+```{r}
+# Open a new PDF device
+pdf("03_results/Contrast_analysis/AND/AND_C2_statistic_Manhattan_plots_300bp.pdf", width = 15, height = 10)
+
+names(AND_POD_C2_thresholds)
+
+# Loop through all seeds
+invisible(
+  lapply(
+    AND_baypass_setup_info$run_info$seeds,
+    function(seed) {
+      
+      # 1. Get C2 data for this seed
+      AND_snp_data <- AND_core_mode_results[["contrast"]][[seed]]
+      
+      # 2. Get threshold for this seed
+      AND_c2_thresh <- AND_POD_C2_thresholds[[as.character(seed)]]
+
+      # 3. Add outlier flag to SNP table based on M_C2 and C2 threshold
+      AND_snp_data <- AND_snp_data %>%
+        mutate(
+            is_outlier = case_when(
+            C2 >= c2_thresh ~ "outlier",
+            TRUE ~ "not outlier"
+  ),
+          CONTRAST = as.character(CONTRAST)
+        ) %>%
+        left_join(AND_SNP_metadata, by = "MRK") %>%
+        left_join(contrast_key, by = "CONTRAST")  # Add contrast names
+
+      # 4. Plot using ContrastName
+      print(
+        ggplot(AND_snp_data, aes(x = MRK, y = C2, color = CHROM_color, size = is_outlier)) +
+          geom_point() +
+          geom_hline(yintercept = c2_thresh, linetype = "dashed", color = "grey30") +
+          scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+          scale_size_manual(values = c("outlier" = 2, "not outlier" = 1)) +
+          facet_wrap(~ ContrastName, scales = "free_x", ncol = 1) +  # Use readable names
+          labs(
+            title = paste("C2 statistic (Seed", seed, ")"),
+            x = "SNP (MRK)",
+            y = "C2 value"
+          ) +
+          guides(color = "none", size = "none") +
+          theme_minimal() +
+          theme(panel.grid = element_blank())
+      )
+    }
+  )
+)
+
+# Close the PDF device
+dev.off()
+
+```
+
+###### Extract total C2 outliers for each contrast in a list
+
+```{r}
+
+# 1. Get the C2 data for seed 7357
+AND_C2_snp_data <- AND_core_mode_results[["contrast"]][["7357"]]
+
+# 2. Get the threshold (99th percentile from PODs)
+AND_c2_thresh <- as.numeric(AND_POD_C2_thresholds["7357"])
+
+# 3. Filter SNPs that are outliers
+AND_C2_outliers_7357 <- AND_C2_snp_data %>%
+  filter(C2 >= AND_c2_thresh)
+
+# Optional: just get vector of SNP IDs (MRK)
+AND_C2_outlier_ids_7357 <- AND_C2_outliers_7357$MRK
+
+# Optional: save to CSV
+write.csv(AND_C2_outliers_7357, "03_results/Contrast_analysis/AND/AND_C2_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+###### Venn Diagram for the C2 statistic of the 3 contrasts
+
+```{R}
+AND_C2_venn_diagram_dataset <- AND_core_mode_results$contrast[["7357"]] %>%
+  mutate(CONTRAST = as.character(CONTRAST)) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  filter(C2 >= AND_POD_C2_thresholds["7357"]) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/Contrast_analysis/AND/AND_C2_VennDiagram_7357_300bp.pdf", width = 12, height = 8)
+
+AND_C2_VennDiagram_plot <- ggVennDiagram(AND_C2_venn_diagram_dataset, label = "count", label_color = "white") +
+  labs(title = "C2 Outliers per contrast")
+
+print(AND_C2_VennDiagram_plot)
+
+dev.off()
+```
+
+###### Extract common C2 outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+AND_C2_common_outliers <- Reduce(intersect, AND_C2_venn_diagram_dataset)
+
+AND_C2_common_outliers_df <- AND_SNP_metadata %>%
+  filter(MRK %in% AND_C2_common_outliers)
+
+# Optional: save to CSV
+write.csv(AND_C2_common_outliers_df, "03_results/Contrast_analysis/AND/AND_common_C2_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+##### BF outliers
+
+```{R}
+# Set seed to plot
+seed <- "7357"
+
+# BF threshold for decisive evidence (e.g. Jeffreys’ rule)
+bf_thresh <- 10
+
+# Read BF values (6 contrasts × N SNPs)
+AND_bf_data <- AND_core_mode_results$betai_reg[[seed]]$BF.dB.
+AND_n_contrasts <- length(unique(contrast_key$CONTRAST))
+AND_n_snps <- length(AND_bf_data) / AND_n_contrasts
+
+# Create tibble with BF per SNP and contrast
+AND_BF_df <- tibble(
+  MRK = rep(1:AND_n_snps, times = AND_n_contrasts),
+  CONTRAST = as.character(rep(1:AND_n_contrasts, each = AND_n_snps)),
+  BF = AND_bf_data
+) %>%
+  mutate(
+    is_outlier = ifelse(BF >= bf_thresh, "outlier", "not outlier")
+  ) %>%
+  left_join(AND_SNP_metadata, by = "MRK") %>%
+  left_join(contrast_key, by = "CONTRAST")
+
+# Save to PDF
+pdf("03_results/Contrast_analysis/AND/AND_BF_statistic_Manhattan_plot_seed7357_300bp.pdf", width = 15, height = 10)
+
+# Plot
+print(
+  ggplot(AND_BF_df, aes(x = MRK, y = BF, color = CHROM_color, size = is_outlier)) +
+    geom_point() +
+    geom_hline(yintercept = bf_thresh, linetype = "dashed", color = "black") +
+    scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+    scale_size_manual(values = c("outlier" = 2, "not outlier" = 1)) +
+    facet_wrap(~ ContrastName, scales = "free_x", ncol = 1) +
+    labs(
+      title = paste("Bayes Factor (BF) Statistic – Seed", seed),
+      x = "SNP (MRK)",
+      y = "BF (dB)"
+    ) +
+    guides(color = "none", size = "none") +
+    theme_minimal() +
+    theme(panel.grid = element_blank())
+)
+
+dev.off()
+```
+
+###### Extract total BF outliers in a list
+
+```{r}
+
+# 1. Get the BF data for seed 7357
+AND_BF_snp_data <- AND_core_mode_results[["betai_reg"]][["7357"]]
+
+# 2. Get the threshold (99th percentile from PODs)
+AND_bf_thresh <- as.numeric(AND_POD_BF_thresholds["7357"])
+
+# 3. Add MRK column if needed
+AND_BF_snp_data <- AND_BF_snp_data %>%
+  mutate(MRK = 1:n())
+
+# 4. Filter SNPs that are outliers
+AND_BF_outliers_7357 <- AND_BF_snp_data %>%
+  filter(BF.dB. >= AND_bf_thresh)
+
+# Optional: just get vector of SNP IDs (MRK)
+AND_BF_outlier_ids_7357 <- AND_BF_outliers_7357$MRK
+
+# Optional: save to CSV
+write.csv(AND_BF_outliers_7357, "03_results/Contrast_analysis/AND/AND_BF_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+###### Venn Diagram for the BF statistic of the 3 contrasts
+
+```{R}
+# Create list of BF outliers per contrast
+AND_BF_venn_diagram_dataset <- AND_core_mode_results$betai_reg[["7357"]] %>%
+  mutate(CONTRAST = as.character(COVARIABLE)) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  group_by(ContrastName) %>%
+  mutate(MRK = row_number()) %>%  # safer than rep()
+  ungroup() %>%
+  filter(BF.dB. >= AND_POD_BF_thresholds["7357"]) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/Contrast_analysis/AND/AND_BF_VennDiagram_7357_300bp.pdf", width = 8, height = 6)
+
+AND_BF_VennDiagram_plot <- ggVennDiagram(AND_BF_venn_diagram_dataset, label = "count", label_color = "white") +
+  labs(title = "BF Outliers (Seed 7357 – BF ≥ threshold)")
+
+print(AND_BF_VennDiagram_plot)
+
+dev.off()
+```
+
+###### Extract common BF outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+AND_BF_common_outliers <- Reduce(intersect, AND_BF_venn_diagram_dataset)
+
+AND_BF_common_outliers_df <- AND_SNP_metadata %>%
+  filter(MRK %in% AND_BF_common_outliers)
+
+# Optional: save to CSV
+write.csv(AND_BF_common_outliers_df, "03_results/Contrast_analysis/AND/AND_common_BF_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+#### C2 vs BF plot
+
+```{R}
+#|figfig-width: 10
+#|figfig-height: 15
+# Set seed
+seed <- "7357"
+
+# Load BF data for this seed
+AND_bf_file <- file.path(
+  "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/baypass/2_BAYPASS_output/AND_run_baypass_300bp_analysis_output/0_core_mode_output/",
+  paste0("seed_", seed),
+  paste0("AND_run_baypass_300bp_seed", seed, "_core_summary_betai_reg.out")
+)
+
+AND_BF_values <- read.table(AND_bf_file, header = TRUE)$BF.dB.
+AND_n_snps <- length(AND_BF_values)
+AND_n_contrasts <- 3
+
+AND_BF_table <- tibble(
+  MRK = rep(1:(AND_n_snps / AND_n_contrasts), times = AND_n_contrasts),
+  CONTRAST = as.character(rep(1:AND_n_contrasts, each = AND_n_snps / AND_n_contrasts)),
+  BF = AND_BF_values
+) %>%
+  left_join(contrast_key, by = "CONTRAST")
+
+# Load C2 values
+AND_C2_table <- AND_core_mode_results[["contrast"]][[seed]] %>%
+  mutate(
+    CONTRAST = as.character(CONTRAST),
+    log10p = log10.1.pval.
+  ) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  select(MRK, ContrastName, C2, log10p)
+
+# Combine BF and C2 values
+AND_C2_BF_combined <- AND_C2_table %>%
+  left_join(AND_BF_table, by = c("MRK", "ContrastName"))
+
+# Add outlier flags using empirical threshold
+AND_C2_threshold <- as.numeric(AND_POD_C2_thresholds[seed])
+
+AND_C2_BF_combined <- AND_C2_BF_combined %>%
+  mutate(
+    C2_outlier = C2 >= C2_threshold,
+    BF_outlier = BF >= 10,
+    both_outlier = C2_outlier & BF_outlier
+  )
+
+# Optional: extract only double outliers
+AND_C2_BF_outliers_7357 <- AND_C2_BF_combined %>% filter(both_outlier)
+
+# Plot
+plot_path <- "03_results/C2_BF/AND_seed7357_BF_vs_C2_300bp_plot.pdf"
+dir.create(dirname(plot_path), recursive = TRUE, showWarnings = FALSE)
+
+ggplot(AND_C2_BF_combined, aes(x = BF, y = C2)) +
+  geom_point(aes(color = both_outlier), alpha = 0.7) +
+  facet_wrap(~ ContrastName, ncol = 1) +
+  geom_hline(yintercept = C2_threshold, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = 10, linetype = "dashed", color = "blue") +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+  labs(
+    title = "Bayes Factor vs C2 Statistic (Seed 7357)",
+    subtitle = "Red = Outliers for BOTH BF and C2",
+    x = "Bayes Factor (BF in dB)",
+    y = "C2 Statistic"
+  ) +
+  guides(color = guide_legend(title = "Outlier (BF & C2)")) +
+  theme_minimal()
+
+# Save plot
+ggsave(plot_path, width = 10, height = 15)
+
+# Join SNP metadata to include POS and CHROM info
+AND_C2_BF_outliers_7357_position <- AND_C2_BF_outliers_7357 %>%
+  left_join(AND_SNP_metadata, by = "MRK")
+
+# Save updated CSV
+write_csv(AND_C2_BF_outliers_7357_position, "03_results/C2_BF/AND_seed7357_C2_BF_300bp_outliers_with_POS.csv")
+```
+
+###### Venn Diagram for the C2 x BF statistic of the 3 contrasts
+
+```{R}
+# Create list of MRKs that are outliers in BOTH C2 and BF per contrast
+AND_C2_BF_venn_diagram_dataset <- AND_C2_BF_combined %>%
+  filter(both_outlier == TRUE) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/C2_BF/AND_C2_BF_VennDiagram_7357_300bp.pdf", width = 12, height = 8)
+
+AND_C2_BF_VennDiagram_plot <- ggVennDiagram(
+  AND_C2_BF_venn_diagram_dataset,
+  label = "count",
+  label_color = "white"
+) +
+  labs(title = "C2 x BF Outliers per Contrast")
+
+print(AND_C2_BF_VennDiagram_plot)
+
+dev.off()
+```
+
+###### Extract common (INTERSECT) C2 x BF outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+AND_C2_BF_common_outliers <- Reduce(intersect, AND_C2_BF_venn_diagram_dataset)
+
+AND_C2_BF_common_outliers_df <- AND_SNP_metadata %>%
+  filter(MRK %in% AND_C2_BF_common_outliers)
+
+# Optional: save to CSV
+write.csv(AND_C2_BF_common_outliers_df, "03_results/C2_BF/AND_C2_BF_common_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+####### Extract common (UNION) C2 x BF outliers between contrasts in a list
+
+```{R}
+# Load main outlier table
+AND_C2_BF_total_outliers <- read_csv("03_results/C2_BF/AND_seed7357_C2_BF_300bp_outliers.csv")
+
+# Split by contrast
+split_outliers <- split(AND_C2_BF_total_outliers, AND_C2_BF_total_outliers$ContrastName)
+
+# Define helper function to merge and clean columns
+# Helper to get common outliers and clean up column names
+AND_extract_C2_BF_total_outliers <- function(df1, df2) {
+  inner_join(df1, df2, by = "MRK", suffix = c(".1", ".2")) %>%
+    transmute(
+      MRK,
+      ContrastName = ContrastName.1,
+      C2 = C2.1,
+      log10p = log10p.1,
+      BF = BF.1,
+      C2_outlier = C2_outlier.1,
+      BF_outlier = BF_outlier.1,
+      both_outlier = both_outlier.1
+    )
+}
+
+# Compute pairwise intersections
+AND_UNION_C2_BF_outlier_C1_C2  <- AND_extract_C2_BF_total_outliers(split_outliers[[1]], split_outliers[[2]])
+AND_UNION_C2_BF_outlier_C1_C3 <- AND_extract_C2_BF_total_outliers(split_outliers[[1]], split_outliers[[3]])
+AND_UNION_C2_BF_outlier_C2_C3 <- AND_extract_C2_BF_total_outliers(split_outliers[[2]], split_outliers[[3]])
+
+# Export as CSV
+write_csv(AND_UNION_C2_BF_outlier_C1_C2, "03_results/C2_BF/AND_C2_BF_common_outliers_C1_C2.csv")
+write_csv(AND_UNION_C2_BF_outlier_C1_C3, "03_results/C2_BF/AND_C2_BF_common_outliers_C1_C3.csv")
+write_csv(AND_UNION_C2_BF_outlier_C2_C3, "03_results/C2_BF/AND_C2_BF_common_outliers_C2_C3.csv")
+```
+
+#### Compute Local Scores
+
+```{R}
+# Set seed and contrast
+seed <- "7357"
+contrast_id <- "1"  # Use "1", "2", or "3"
+
+# 1. SNP position info
+AND_snp_position <- AND_SNP_metadata %>%
+  select(CHROM, POS) %>%
+  mutate(POS = as.numeric(POS)) 
+
+# 2. Extract pi values (from summary_pi_xtx.out)
+AND_snp_pi <- AND_core_mode_results$xtx_estimator[[seed]]$M_P
+
+# 3. Extract p-values (from summary_contrast.out)
+AND_snp_pvalues <- AND_core_mode_results$contrast[[seed]] %>%
+  filter(CONTRAST == contrast_id) %>%
+  pull(log10.1.pval.)
+
+# 4. Compute local scores (and plot)
+pdf(paste0("03_results/Local_scores/AND_local_scores_contrast_", contrast_id, "_seed", seed, "_300bp.pdf"),
+    width = 10, height = 6)
+
+AND_local_scores <- compute.local.scores(
+  snp.position = AND_snp_position,
+  snp.pi = AND_snp_pi,
+  snp.pvalue = AND_snp_pvalues,
+  manplot = TRUE,
+  min.maf = 0.20,
+  xi = 1,
+  plot.pvalhist = TRUE
+)
+
+ # Save output tables from compute.local.scores
+ write.csv(AND_local_scores$res.local.scores,
+          file = paste0("03_results/Local_scores/AND_local_scores_contrast_", contrast_id, "_seed", seed, "_res_local_scores.csv"),
+         row.names = FALSE)
+
+write.csv(AND_local_scores$significant.windows,
+          file = paste0("03_results/Local_scores/AND_local_scores_contrast_", contrast_id, "_seed", seed, "_significant_windows.csv"),
+          row.names = FALSE)
+
+
+dev.off()
+```
+
+###############################################################################################################################
+
+# BOMBUS TERRESTRIS
+
+### Core model analysis
+
+#### Setup Baypass run
+
+```{r}
+BOM_baypass_setup_info <- baypass_run_setup(
+  executable_path = "/home/dau2/software/baypass_public-master_3.0/sources/g_baypass",
+  baypass_utils_path = "/home/dau2/software/baypass_public-master_3.0/utils/baypass_utils.R",
+  popfile_path = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/BOM_popmap_baypass.txt",
+  envfile_path = "contrast_files/BOM_contrast_file.txt",
+  contrast_path = "contrast_files/BOM_contrast_file.txt",
+  genofile_path = "01_intermediate_files/BOM_stk_rm_kinship_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.baypass",
+  output_path = "2_BAYPASS_output/",
+  run_prefix = "BOM_run_baypass_300bp",
+  n_pops = 11,
+  seeds = "7357",
+  thread_number = 8
+)
+```
+
+Store setup information.
+
+```{r}
+saveRDS(
+  BOM_baypass_setup_info,
+  "03_results/R_data/BOM_run_baypass_300bp.RDS.bz2",
+  compress = "bzip2"
+)
+```
+
+#### Run analysis
+
+Run core model using wrapper function `core_mode_wrapper()`:
+
+```{r}
+BOM_core_mode_results <- 
+  core_mode_wrapper(BOM_baypass_setup_info, skip_baypass = F)
+```
+
+
+#### Source Baypass utils
+
+```{R}
+source(BOM_baypass_setup_info$paths$baypass_utils_path)
+```
+
+### Check P-value Behaviour
+
+#### XtXst estimator
+
+Visualize the estimates of the XtXst differentiation measures.
+
+Check behavior of the p-values associated to the XtXst estimator.
+
+```{r}
+lapply(
+  BOM_baypass_setup_info$run_info$seeds,
+  \(x) BOM_core_mode_results[["xtx_estimator"]][[x]] %>% 
+    ggplot(aes(x = 10**(-1 * log10.1.pval.), y = ..density..)) +
+    geom_histogram(bins = 50, boundary = 0) +
+    geom_hline(yintercept = 1) +
+    ggtitle(paste("Seed", x))
+  )
+
+```
+
+Plot XtXst estimates and p-values
+
+```{r}
+
+layout(matrix(1:2, 2, 1))
+
+for (seed in BOM_baypass_setup_info$run_info$seeds) {
+  
+  BOM_xtx_data <- BOM_core_mode_results[["xtx_estimator"]][[seed]]
+
+  # Plot XtXst
+  plot(
+    BOM_xtx_data$XtXst,
+    ylab = "XtXst",
+    xlab = "SNP Index",
+    main = paste("XtXst – Seed", seed),
+    pch = 20
+  )
+
+  # Plot log10.1.pval.
+  plot(
+    BOM_xtx_data$log10.1.pval.,
+    ylab = expression("XtX P-value (" * -log[10] * "(p))"),
+    xlab = "SNP Index",
+    main = paste("XtX P-values – Seed", seed),
+    pch = 20
+  )
+  
+  abline(h = 3, lty = 2, col = "red")  # log10(p = 0.001)
+}
+```
+
+##### [OPTIONAL] Correcting for multiple testing
+
+When correcting for multiple testing, p-values should be converted in q-values
+
+Setting FDR (False Discovery Rate) = 0.05 or 0.01
+
+```{r}
+BOM_xtx_qvalues <-
+  lapply(
+    BOM_baypass_setup_info$run_info$seeds,
+    \(x) BOM_core_mode_results[["xtx_estimator"]][[x]] %>% 
+      mutate(pval =  10**(-1 * log10.1.pval.)) %>% 
+      pull(pval) %>% 
+      qvalue(fdr.level = 0.05)
+    )
+```
+
+Print the summary for every seed
+
+```{r}
+invisible(
+  Map(
+    \(seed, qobj) {
+      cat("\n#####  Seed:", seed, "#####\n")
+      print(summary(qobj))
+      },
+      BOM_baypass_setup_info$run_info$seeds,   # names / labels
+      BOM_xtx_qvalues                          # corresponding q-value objects
+    )
+  )
+```
+
+#### C2 statistic
+
+```{R}
+# Open PDF device
+pdf("03_results/Contrast_analysis/graphs/BOM_C2_pvalue_histograms_300bp.pdf", width = 8, height = 12)
+
+# Loop through each seed and print the plot
+invisible(
+  lapply(
+    BOM_baypass_setup_info$run_info$seeds,
+    function(x) {
+      p <- BOM_core_mode_results[["contrast"]][[x]] %>% 
+        ggplot(aes(x = 10^(-1 * log10.1.pval.), y = ..density..)) +
+        geom_histogram(bins = 50, boundary = 0) +
+        geom_hline(yintercept = 1) +
+        facet_wrap(~CONTRAST, ncol = 1) +
+        ggtitle(paste("Seed", x))
+      
+      print(p)
+    }
+  )
+)
+
+# Close PDF device
+dev.off()
+```
+
+##### [OPTIONAL] Correcting for multiple testing
+
+When correcting for multiple testing, p-values should be converted in q-values
+
+Setting FDR (False Discovery Rate) = 0.05 or 0.01
+
+```{R}
+BOM_c2_qvalues <-
+lapply(
+  BOM_baypass_setup_info$run_info$seeds,
+  \(x) BOM_core_mode_results[["contrast"]][[x]] %>% 
+    mutate(pval =  10**(-1 * log10.1.pval.)) %>% 
+    pull(pval) %>% 
+    qvalue(fdr.level = 0.05)
+  )
+```
+
+Print the summary for every seed
+
+```{r}
+invisible(
+  Map(
+    \(seed, qobj) {
+      cat("\n#####  Seed:", seed, "#####\n")
+      print(summary(qobj))
+      },
+      BOM_baypass_setup_info$run_info$seeds,   # names / labels
+      BOM_c2_qvalues                          # corresponding q-value objects
+    )
+  )
+```
+
+## Simulate the POD dataset
+
+```{r}
+
+# Estimate beta parameters for the Pi distribution
+BOM_pi_beta <- BOM_core_mode_results$pi_beta_coef[["7357"]]$Mean
+
+# Extract allele counts from your original .baypass genotype file
+BOM_allele_data <- geno2YN(BOM_baypass_setup_info$paths$genofile)
+
+# Simulate 30,000 SNPs based on the estimated parameters
+simulate.baypass(
+  omega.mat = BOM_core_mode_results$omega_matrix[["7357"]],
+  nsnp = 45748,
+  sample.size = BOM_allele_data$NN,
+  beta.pi = BOM_pi_beta,
+  pi.maf = 0,
+  suffix = "BOM_POD_300bp"
+)
+```
+
+#### Set up the BayPass POD run
+
+```{r}
+
+BOM_POD_setup_info <- baypass_run_setup(
+  executable_path = "/home/dau2/software/baypass_public-master_3.0/sources/g_baypass",
+  baypass_utils_path = "/home/dau2/software/baypass_public-master_3.0/utils/baypass_utils.R",
+  popfile_path = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/BOM_popmap_baypass.txt",
+  envfile_path = "contrast_files/BOM_contrast_file.txt",
+  contrast_path = "contrast_files/BOM_contrast_file.txt",
+  genofile_path = "2_BAYPASS_output/BOM_POD_run_analysis_output/0_core_mode_output/G.BOM_POD_300bp",
+  output_path = "2_BAYPASS_output/BOM_POD_run_analysis_output/0_core_mode_output/seed_7357_mac2_300bp_window/",
+  run_prefix = "BOM_POD_mac2_300bp_window_run",
+  n_pops = 11,
+  seeds = "7357",
+  thread_number = 8
+)
+```
+
+#### Save the setup
+
+```{r}
+
+saveRDS(
+  BOM_POD_setup_info,
+  "03_results/R_data/BOM_POD_mac2_300bp_window_run_setup.RDS.bz2",
+  compress = "bzip2"
+)
+```
+
+#### Run BayPass on the POD dataset
+
+```{r}
+
+BOM_POD_results <- core_mode_wrapper(BOM_POD_setup_info , skip_baypass = F)
+
+```
+
+#### Extract 99th percentile XtXst thresholds per seed
+
+```{r}
+
+BOM_POD_xtxst_thresholds <- lapply(
+  BOM_POD_results$xtx_estimator,
+  \(df) quantile(df$XtXst, probs = 0.99)
+) %>% unlist()
+
+# Name the vector (should already be named if your object is correct)
+names(BOM_POD_xtxst_thresholds)
+```
+
+#### Extract 99th percentile C2 thresholds per seed
+
+```{r}
+BOM_POD_C2_thresholds <- setNames(
+  sapply(
+    BOM_baypass_setup_info$run_info$seeds,
+    \(x) quantile(BOM_POD_results[["contrast"]][[x]][["C2"]], probs = 0.99)
+  ),
+  BOM_baypass_setup_info$run_info$seeds
+)
+```
+
+#### Extract 99th percentile BF thresholds per seed
+
+```{R}
+BOM_POD_BF_thresholds <- setNames(
+  sapply(
+    BOM_baypass_setup_info$run_info$seeds,
+    \(x) quantile(BOM_POD_results[["betai_reg"]][[x]]$BF.dB., probs = 0.99, na.rm = TRUE)
+  ),
+  BOM_baypass_setup_info$run_info$seeds
+)
+```
+
+### Analyze `Baypass` results
+
+#### Check convergence of the covariance matrix
+
+Calculate correlation between the posterior means of the estimated Omega matrix elements across independent runs.
+
+```{R}
+BOM_core_mode_results$lda_omega %>% 
+  bind_rows(.id = "seed") %>%
+  mutate(comparison = paste0(I, " - ", J)) %>% 
+  select(comparison, seed, M_omega_ij) %>% 
+  pivot_wider(names_from = seed, values_from = M_omega_ij) %>% 
+  column_to_rownames("comparison") %>% 
+  cor() 
+```
+
+Visualize covariance matrix using SVD decomposition:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+plot.omega(
+  omega = BOM_core_mode_results[["omega_matrix"]][["7357"]],
+  pop.names = BOM_core_mode_results[["pop_names"]]
+)
+```
+
+Visualize covariance matrix as a correlation plot:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+# Convert to correlation matrix
+corr_mat <- cov2cor(
+  BOM_core_mode_results[["omega_matrix"]][["7357"]]
+)
+
+# Plot correlation
+corrplot(
+  corr_mat,
+  method = "color",
+  mar = c(2, 1, 2, 2) + 0.1,
+  main = expression("Correlation map based on" ~ hat(Omega))
+)
+```
+
+Visualize covariance matrix as a heatmap:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+heatmap(
+  1 - corr_mat,
+  hclustfun = \(x) hclust(x, method = "average"),
+  main = expression("Heatmap of " ~ hat(Omega) ~ "(" * d[ij] * "=1-" * rho[ij] * ")")
+)
+```
+
+Visualize covariance matrix as hierarchical clustering tree:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+plot(
+  as.phylo(
+    hclust(
+      as.dist(1 - corr_mat**2)
+    )
+  ),
+  type = "p",
+  main = expression(
+    "Hier. clust. tree based on" ~ hat(Omega) ~ "(" * d[ij] * "=1-" * rho[ij] * ")"
+  )
+)
+```
+
+#### XtXst estimator
+
+##### XtXst outliers
+
+Visualize the outliers from the XtXst in the original data using the POD threshold. 
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+BOM_SNP_metadata <- 
+  vcf_vcfr_dataset[["BOM"]]@fix %>% 
+  as.data.frame() %>% 
+  select(CHROM, POS) %>% 
+  mutate(
+    MRK = 1:n(),
+    CHROM_number = as.numeric(str_extract(CHROM, "\\d+")),
+    CHROM_color = case_when(
+      CHROM_number %% 2 == 0 ~ "even",
+      TRUE ~ "odd"
+    )
+  )
+
+names(BOM_POD_xtxst_thresholds) <- as.character(BOM_baypass_setup_info$run_info$seeds)
+
+BOM_xtxst_manhattan_plots <- lapply(
+  BOM_baypass_setup_info$run_info$seeds,
+  function(seed) {
+    # 1. Get BayPass results for this seed
+    snp_data <- BOM_core_mode_results[["xtx_estimator"]][[seed]]
+    
+    # 2. Get corresponding threshold from POD
+    threshold <- BOM_POD_xtxst_thresholds[[as.character(seed)]]
+    
+    # 3. Annotate with outlier flag + SNP metadata
+    snp_data <- snp_data %>%
+      mutate(
+        is_outlier = ifelse(XtXst >= threshold, "outlier", "not outlier")
+      ) %>%
+      left_join(BOM_SNP_metadata, by = "MRK")
+    
+    # 4. Manhattan plot
+    ggplot(snp_data, aes(x = MRK, y = XtXst, color = CHROM_color, size = is_outlier)) +
+      geom_point() +
+      geom_hline(yintercept = threshold, linetype = "dashed", color = "red") +
+      scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+      scale_size_manual(values = c("outlier" = 2, "not outlier" = 0.5)) +
+      labs(
+        title = paste("XtXst Manhattan Plot – Seed", seed),
+        subtitle = paste("Threshold from POD:", round(threshold, 3)),
+        x = "SNP (MRK)",
+        y = "XtXst"
+      ) +
+      guides(color = "none", size = "none") +
+      theme_minimal() +
+      theme(panel.grid = element_blank())
+  }
+)
+
+names(BOM_POD_xtxst_thresholds) <- as.character(BOM_baypass_setup_info$run_info$seeds)
+
+# Print the plots
+
+for (plot in BOM_xtxst_manhattan_plots) {
+  print(plot)
+}
+
+# Save to a PDF
+
+pdf("03_results/graphs/BOM_XtXst_Manhattan_plots", width = 12, height = 6)
+
+for (p in BOM_xtxst_manhattan_plots) {
+  print(p)
+}
+
+dev.off()
+```
+
+##### Extract outliers per seed
+
+```{r}
+
+BOM_xtxst_outliers_per_seed <- lapply(
+  names(BOM_POD_xtxst_thresholds),
+  function(seed) {
+    threshold <- BOM_POD_xtxst_thresholds[[seed]]
+    real_data <- BOM_core_mode_results$xtx_estimator[[seed]]
+    
+    real_data %>%
+      filter(XtXst >= threshold) %>%
+      pull(MRK)  # Pulls the marker IDs
+  }
+) %>% setNames(names(BOM_POD_xtxst_thresholds))
+
+BOM_xtxst_common_outliers <- Reduce(intersect, BOM_xtxst_outliers_per_seed)
+length(BOM_xtxst_common_outliers)
+
+pdf("03_results/graphs/XtX/BOM_XtXst_outliers_VennDiagram.pdf", width = 10, height = 8)
+
+print(
+  ggVennDiagram(
+    BOM_xtxst_outliers_per_seed, 
+    label = "count",
+    label_geom = "text",
+    label_color = "white"
+  ) +
+    labs(title = "Overlap of XtXst Outliers (q-value ≤ 0.01) Across Seeds")
+)
+
+dev.off()
+```
+
+##### Calculate Median XtXst
+
+Calculate median XtXst per MRK across seeds.
+
+```{R}
+BOM_median_XtXst <- BOM_core_mode_results$xtx_estimator %>% 
+  bind_rows(.id = "seed") %>%
+  select(seed, MRK, XtXst) %>% 
+  summarise(Median_XtXst = median(XtXst), .by = MRK) %>% 
+  mutate(
+    is_outlier = ifelse(Median_XtXst >= BOM_POD_xtxst_thresholds[1] , "outlier", "not outlier")
+    )
+```
+
+Create a list with XtXst outliers.
+
+```{R}
+BOM_median_XtXst_outlier_list <- BOM_median_XtXst %>% 
+  filter(is_outlier == "outlier") %>% 
+  pull(MRK)
+```
+
+Visualize the outliers from the Mean_XtXst in the original data using the POD threshold. 
+
+```{r}
+#| fig-width: 10
+
+BOM_median_XtXst %>% 
+  left_join(BOM_SNP_metadata) %>% 
+  ggplot(aes(x = MRK, y = Median_XtXst, color = CHROM_color, size = is_outlier)) +
+      geom_point() +
+      geom_hline(yintercept = BOM_POD_xtxst_thresholds[1], linetype = "dashed", color = "red") +
+      scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+      scale_size_manual(values = c("outlier" = 1.5, "not outlier" = 0.5)) +
+      labs(
+        title = "Median XtXst Manhattan Plot",
+        x = "SNP (MRK)",
+        y = " Median XtXst"
+      ) +
+      guides(color = "none", size = "none") +
+      theme_minimal() +
+      theme(panel.grid = element_blank())
+
+ggsave("03_results/graphs/XtX/BOM_median_XtXst_Manhattan_Plot.pdf", width = 10)
+```
+
+#### C2 Statistic
+
+##### Check convergence of the covariance matrix
+
+Calculate correlation between C2 statistics of different runs.
+
+```{R}
+BOM_core_mode_results$contrast %>% 
+  bind_rows(.id = "seed") %>%
+  mutate(comparison = paste0(CONTRAST, " - ", MRK)) %>% 
+  select(comparison, seed, C2) %>% 
+  pivot_wider(names_from = seed, values_from = C2) %>% 
+  column_to_rownames("comparison") %>% 
+  cor() 
+```
+
+##### C2 outliers
+
+```{R}
+# Open a new PDF device
+pdf("03_results/Contrast_analysis/graphs/BOM_C2_statistic_Manhattan_plots_300bp.pdf", width = 15, height = 10)
+
+names(BOM_POD_C2_thresholds)
+
+BOM_SNP_metadata <- 
+  vcf_vcfr_dataset[["BOM"]]@fix %>% 
+  as.data.frame() %>% 
+  select(CHROM, POS) %>% 
+  mutate(
+    MRK = 1:45748,
+    CHROM_number = as.numeric(str_extract(CHROM, "\\d+")),
+    CHROM_color = case_when(
+      CHROM_number %% 2 == 0 ~ "even",
+      TRUE ~ "odd"
+    )
+  )
+
+# Loop through all seeds
+invisible(
+  lapply(
+    BOM_baypass_setup_info$run_info$seeds,
+    function(seed) {
+      
+      # 1. Get C2 data for this seed
+      snp_data <- BOM_core_mode_results[["contrast"]][[seed]]
+      
+      # 2. Get threshold for this seed
+      c2_thresh <- BOM_POD_C2_thresholds[[as.character(seed)]]
+
+      # 3. Add outlier flag to SNP table based on M_C2 BOM C2 threshold
+      snp_data <- snp_data %>%
+        mutate(
+            is_outlier = case_when(
+            C2 >= c2_thresh ~ "outlier",
+            TRUE ~ "not outlier"
+  ),
+          CONTRAST = as.character(CONTRAST)
+        ) %>%
+        left_join(BOM_SNP_metadata, by = "MRK") %>%
+        left_join(contrast_key, by = "CONTRAST")  # Add contrast names
+
+      # 4. Plot using ContrastName
+      print(
+        ggplot(snp_data, aes(x = MRK, y = C2, color = CHROM_color, size = is_outlier)) +
+          geom_point() +
+          geom_hline(yintercept = c2_thresh, linetype = "dashed", color = "grey30") +
+          scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+          scale_size_manual(values = c("outlier" = 2, "not outlier" = 1)) +
+          facet_wrap(~ ContrastName, scales = "free_x", ncol = 1) +  # Use readable names
+          labs(
+            title = paste("C2 M-statistic (Seed", seed, ")"),
+            x = "SNP (MRK)",
+            y = "C2 value"
+          ) +
+          guides(color = "none", size = "none") +
+          theme_minimal() +
+          theme(panel.grid = element_blank())
+      )
+    }
+  )
+)
+
+# Close the PDF device
+dev.off()
+
+```
+
+###### Extract total C2 outliers for each contrast in a list
+
+```{R}
+
+# 1. Get the C2 data for seed 7357
+BOM_snp_data <- BOM_core_mode_results[["contrast"]][["7357"]]
+
+# 2. Get the threshold (99th percentile from PODs)
+BOM_c2_thresh <- as.numeric(BOM_POD_C2_thresholds["7357"])
+
+# 3. Filter SNPs that are outliers
+BOM_C2_outliers_7357 <- BOM_snp_data %>%
+  filter(C2 >= BOM_c2_thresh)
+
+# Optional: just get vector of SNP IDs (MRK)
+BOM_C2_outlier_ids_7357 <- BOM_C2_outliers_7357$MRK
+
+# Optional: save to CSV
+write.csv(BOM_C2_outliers_7357, "03_results/Contrast_analysis/BOM/BOM_C2_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+###### Venn Diagram for the C2 statistic of the 3 contrasts
+
+```{R}
+BOM_C2_venn_diagram_dataset <- BOM_core_mode_results$contrast[["7357"]] %>%
+  mutate(CONTRAST = as.character(CONTRAST)) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  filter(C2 >= BOM_POD_C2_thresholds["7357"]) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/Contrast_analysis/BOM/BOM_C2_VennDiagram_7357_300bp.pdf", width = 12, height = 8)
+
+BOM_C2_VennDiagram_plot <- ggVennDiagram(BOM_C2_venn_diagram_dataset, label = "count", label_color = "white") +
+  labs(title = "C2 Outliers per contrast")
+
+print(BOM_C2_VennDiagram_plot)
+
+dev.off()
+```
+
+###### Extract common C2 outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+BOM_C2_common_outliers <- Reduce(intersect, BOM_C2_venn_diagram_dataset)
+
+BOM_C2_common_outliers_df <- BOM_SNP_metadata %>%
+  filter(MRK %in% BOM_C2_common_outliers)
+
+# Optional: save to CSV
+write.csv(BOM_C2_common_outliers_df, "03_results/Contrast_analysis/BOM/BOM_common_C2_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+##### BF outliers
+
+```{R}
+# Set seed to plot
+seed <- "7357"
+
+# BF threshold for decisive evidence (e.g. Jeffreys’ rule)
+bf_thresh <- 10
+
+# Read BF values (6 contrasts × N SNPs)
+BOM_bf_data <- BOM_core_mode_results$betai_reg[[seed]]$BF.dB.
+BOM_n_contrasts <- length(unique(contrast_key$CONTRAST))
+BOM_n_snps <- length(BOM_bf_data) / BOM_n_contrasts
+
+# Create tibble with BF per SNP BOM contrast
+BOM_BF_df <- tibble(
+  MRK = rep(1:BOM_n_snps, times = BOM_n_contrasts),
+  CONTRAST = as.character(rep(1:BOM_n_contrasts, each = BOM_n_snps)),
+  BF = BOM_bf_data
+) %>%
+  mutate(
+    is_outlier = ifelse(BF >= bf_thresh, "outlier", "not outlier")
+  ) %>%
+  left_join(BOM_SNP_metadata, by = "MRK") %>%
+  left_join(contrast_key, by = "CONTRAST")
+
+# Save to PDF
+pdf("03_results/Contrast_analysis/BOM/BOM_BF_statistic_Manhattan_plot_seed7357_300bp.pdf", width = 15, height = 10)
+
+# Plot
+print(
+  ggplot(BOM_BF_df, aes(x = MRK, y = BF, color = CHROM_color, size = is_outlier)) +
+    geom_point() +
+    geom_hline(yintercept = bf_thresh, linetype = "dashed", color = "black") +
+    scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+    scale_size_manual(values = c("outlier" = 2, "not outlier" = 1)) +
+    facet_wrap(~ ContrastName, scales = "free_x", ncol = 1) +
+    labs(
+      title = paste("Bayes Factor (BF) Statistic – Seed", seed),
+      x = "SNP (MRK)",
+      y = "BF (dB)"
+    ) +
+    guides(color = "none", size = "none") +
+    theme_minimal() +
+    theme(panel.grid = element_blank())
+)
+
+dev.off()
+```
+
+###### Extract total BF outliers in a list
+
+```{r}
+
+# 1. Get the BF data for seed 7357
+BOM_BF_snp_data <- BOM_core_mode_results[["betai_reg"]][["7357"]]
+
+# 2. Get the threshold (99th percentile from PODs)
+BOM_bf_thresh <- as.numeric(BOM_POD_BF_thresholds["7357"])
+
+# 3. Add MRK column if needed
+BOM_BF_snp_data <- BOM_BF_snp_data %>%
+  mutate(MRK = 1:n())
+
+# 4. Filter SNPs that are outliers
+BOM_BF_outliers_7357 <- BOM_BF_snp_data %>%
+  filter(BF.dB. >= BOM_bf_thresh)
+
+# Optional: just get vector of SNP IDs (MRK)
+BOM_BF_outlier_ids_7357 <- BOM_BF_outliers_7357$MRK
+
+# Optional: save to CSV
+write.csv(BOM_BF_outliers_7357, "03_results/Contrast_analysis/BOM/BOM_BF_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+###### Venn Diagram for the BF statistic of the 3 contrasts
+
+```{R}
+# Create list of BF outliers per contrast
+BOM_BF_venn_diagram_dataset <- BOM_core_mode_results$betai_reg[["7357"]] %>%
+  mutate(CONTRAST = as.character(COVARIABLE)) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  group_by(ContrastName) %>%
+  mutate(MRK = row_number()) %>%  # safer than rep()
+  ungroup() %>%
+  filter(BF.dB. >= BOM_POD_BF_thresholds["7357"]) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/Contrast_analysis/BOM/BOM_BF_VennDiagram_7357_300bp.pdf", width = 8, height = 6)
+
+BOM_BF_VennDiagram_plot <- ggVennDiagram(BOM_BF_venn_diagram_dataset, label = "count", label_color = "white") +
+  labs(title = "BF Outliers (Seed 7357 – BF ≥ threshold)")
+
+print(BOM_BF_VennDiagram_plot)
+
+dev.off()
+```
+
+###### Extract common BF outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+BOM_BF_common_outliers <- Reduce(intersect, BOM_BF_venn_diagram_dataset)
+
+BOM_BF_common_outliers_df <- BOM_SNP_metadata %>%
+  filter(MRK %in% BOM_BF_common_outliers)
+
+# Optional: save to CSV
+write.csv(BOM_BF_common_outliers_df, "03_results/Contrast_analysis/BOM/BOM_common_BF_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+#### C2 vs BF plot
+
+```{R}
+#|figfig-width: 10
+#|figfig-height: 15
+# Set seed
+seed <- "7357"
+
+# Load BF data for this seed
+BOM_bf_file <- file.path(
+  "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/baypass/2_BAYPASS_output/BOM_run_baypass_300bp_analysis_output/0_core_mode_output/",
+  paste0("seed_", seed),
+  paste0("BOM_run_baypass_300bp_seed", seed, "_core_summary_betai_reg.out")
+)
+
+BOM_bf_values <- read.table(BOM_bf_file, header = TRUE)$BF.dB.
+BOM_n_snps <- length(BOM_bf_values)
+BOM_n_contrasts <- 3
+
+BOM_BF_table <- tibble(
+  MRK = rep(1:(BOM_n_snps / BOM_n_contrasts), times = BOM_n_contrasts),
+  CONTRAST = as.character(rep(1:BOM_n_contrasts, each = BOM_n_snps / BOM_n_contrasts)),
+  BF = BOM_bf_values
+) %>%
+  left_join(contrast_key, by = "CONTRAST")
+
+# Load C2 values
+BOM_C2_table <- BOM_core_mode_results[["contrast"]][[seed]] %>%
+  mutate(
+    CONTRAST = as.character(CONTRAST),
+    log10p = log10.1.pval.
+  ) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  select(MRK, ContrastName, C2, log10p)
+
+# Combine BF and C2 values
+BOM_C2_BF_combined <- BOM_C2_table %>%
+  left_join(BOM_BF_table, by = c("MRK", "ContrastName"))
+
+# Add outlier flags using empirical threshold
+BOM_C2_threshold <- as.numeric(BOM_POD_C2_thresholds[seed])
+
+BOM_C2_BF_combined <- BOM_C2_BF_combined %>%
+  mutate(
+    C2_outlier = C2 >= C2_threshold,
+    BF_outlier = BF >= 10,
+    both_outlier = C2_outlier & BF_outlier
+  )
+
+# Optional: extract only double outliers
+BOM_C2_BF_outliers_7357 <- BOM_C2_BF_combined %>% filter(both_outlier)
+
+# Plot
+plot_path <- "03_results/C2_BF/BOM_seed7357_BF_vs_C2_300bp_plot.pdf"
+dir.create(dirname(plot_path), recursive = TRUE, showWarnings = FALSE)
+
+ggplot(BOM_C2_BF_combined, aes(x = BF, y = C2)) +
+  geom_point(aes(color = both_outlier), alpha = 0.7) +
+  facet_wrap(~ ContrastName, ncol = 1) +
+  geom_hline(yintercept = C2_threshold, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = 10, linetype = "dashed", color = "blue") +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+  labs(
+    title = "Bayes Factor vs C2 Statistic (Seed 7357 – AND)",
+    subtitle = "Red = Outliers for BOTH BF and C2",
+    x = "Bayes Factor (BF in dB)",
+    y = "C2 Statistic"
+  ) +
+  guides(color = guide_legend(title = "Outlier (BF & C2)")) +
+  theme_minimal()
+
+# Save plot
+ggsave(plot_path, width = 10, height = 15)
+
+# Join SNP metadata to include POS and CHROM info
+BOM_C2_BF_outliers_7357_position <- BOM_C2_BF_outliers_7357 %>%
+  left_join(BOM_SNP_metadata, by = "MRK")
+
+# Save updated CSV
+write_csv(BOM_C2_BF_outliers_7357_position, "03_results/C2_BF/BOM_seed7357_C2_BF_300bp_outliers_with_POS.csv")
+```
+
+###### Venn Diagram for the C2 x BF statistic of the 3 contrasts
+
+```{R}
+# Create list of MRKs that are outliers in BOTH C2 BOM BF per contrast
+BOM_C2_BF_venn_diagram_dataset <- BOM_C2_BF_combined %>%
+  filter(both_outlier == TRUE) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/C2_BF/BOM_C2_BF_VennDiagram_7357_300bp.pdf", width = 12, height = 8)
+
+BOM_C2_BF_VennDiagram_plot <- ggVennDiagram(
+  BOM_C2_BF_venn_diagram_dataset,
+  label = "count",
+  label_color = "white"
+) +
+  labs(title = "C2 x BF Outliers per Contrast")
+
+print(BOM_C2_BF_VennDiagram_plot)
+
+dev.off()
+```
+
+###### Extract common (INTERSECT) C2 x BF outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+BOM_C2_BF_common_outliers <- Reduce(intersect, BOM_C2_BF_venn_diagram_dataset)
+
+BOM_C2_BF_common_outliers_df <- BOM_SNP_metadata %>%
+  filter(MRK %in% BOM_C2_BF_common_outliers)
+
+# Optional: save to CSV
+write.csv(BOM_C2_BF_common_outliers_df, "03_results/C2_BF/BOM_C2_BF_common_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+####### Extract common (UNION) C2 x BF outliers between contrasts in a list
+
+```{R}
+# Load main outlier table
+BOM_C2_BF_total_outliers <- read_csv("03_results/C2_BF/BOM_seed7357_C2_BF_300bp_outliers.csv")
+
+# Split by contrast
+split_outliers <- split(BOM_C2_BF_total_outliers, BOM_C2_BF_total_outliers$ContrastName)
+
+# Define helper function to merge BOM clean columns
+# Helper to get common outliers BOM clean up column names
+BOM_extract_C2_BF_total_outliers <- function(df1, df2) {
+  inner_join(df1, df2, by = "MRK", suffix = c(".1", ".2")) %>%
+    transmute(
+      MRK,
+      ContrastName = ContrastName.1,
+      C2 = C2.1,
+      log10p = log10p.1,
+      BF = BF.1,
+      C2_outlier = C2_outlier.1,
+      BF_outlier = BF_outlier.1,
+      both_outlier = both_outlier.1
+    )
+}
+
+# Compute pairwise intersections
+BOM_UNION_C2_BF_outlier_C1_C2  <- BOM_extract_C2_BF_total_outliers(split_outliers[[1]], split_outliers[[2]])
+BOM_UNION_C2_BF_outlier_C1_C3 <- BOM_extract_C2_BF_total_outliers(split_outliers[[1]], split_outliers[[3]])
+BOM_UNION_C2_BF_outlier_C2_C3 <- BOM_extract_C2_BF_total_outliers(split_outliers[[2]], split_outliers[[3]])
+
+# Export as CSV
+write_csv(BOM_UNION_C2_BF_outlier_C1_C2, "03_results/C2_BF/BOM_C2_BF_common_outliers_C1_C2.csv")
+write_csv(BOM_UNION_C2_BF_outlier_C1_C3, "03_results/C2_BF/BOM_C2_BF_common_outliers_C1_C3.csv")
+write_csv(BOM_UNION_C2_BF_outlier_C2_C3, "03_results/C2_BF/BOM_C2_BF_common_outliers_C2_C3.csv")
+```
+
+#### Compute Local Scores
+
+```{R}
+# Set seed BOM contrast
+seed <- "7357"
+contrast_id <- "1"  # Use "1", "2", or "3"
+
+# 1. SNP position info
+BOM_snp_position <- BOM_SNP_metadata %>%
+  select(CHROM, POS) %>%
+  mutate(POS = as.numeric(POS)) %>%
+  arrange(POS)
+
+# 2. Extract pi values (from summary_pi_xtx.out)
+BOM_snp_pi <- BOM_core_mode_results$xtx_estimator[[seed]]$M_P
+
+# 3. Extract p-values (from summary_contrast.out)
+BOM_snp_pvalues <- BOM_core_mode_results$contrast[[seed]] %>%
+  filter(CONTRAST == contrast_id) %>%
+  pull(log10.1.pval.)
+
+# 4. Compute local scores (BOM plot)
+pdf(paste0("03_results/Local_scores/BOM_local_scores_contrast_", contrast_id, "_seed", seed, "_300bp.pdf"),
+    width = 10, height = 6)
+
+BOM_local_scores <- compute.local.scores(
+  snp.position = BOM_snp_position,
+  snp.pi = BOM_snp_pi,
+  snp.pvalue = BOM_snp_pvalues,
+  manplot = TRUE,
+  min.maf = 0.20,
+  xi = 1,
+  min.nsnp = 0,
+  plot.pvalhist = TRUE
+)
+
+ # Save output tables from compute.local.scores
+ write.csv(BOM_local_scores$res.local.scores,
+          file = paste0("03_results/Local_scores/BOM_local_scores_contrast_", contrast_id, "_seed", seed, "_res_local_scores.csv"),
+         row.names = FALSE)
+
+write.csv(BOM_local_scores$significant.windows,
+          file = paste0("03_results/Local_scores/BOM_local_scores_contrast_", contrast_id, "_seed", seed, "_significant_windows.csv"),
+          row.names = FALSE)
+
+
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################################################################
+
+# LASIOGLOSSUM MALACHURUM
+
+### Core model analysis
+
+#### Setup Baypass run
+
+```{r}
+LGL_baypass_setup_info <- baypass_run_setup(
+  executable_path = "/home/dau2/software/baypass_public-master_3.0/sources/g_baypass",
+  baypass_utils_path = "/home/dau2/software/baypass_public-master_3.0/utils/baypass_utils.R",
+  popfile_path = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/LGL_popmap_baypass.txt",
+  envfile_path = "contrast_files/LGL_contrast_file.txt",
+  contrast_path = "contrast_files/LGL_contrast_file.txt",
+  genofile_path = "01_intermediate_files/LML_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.baypass",
+  output_path = "2_BAYPASS_output/",
+  run_prefix = "LGL_run_baypass_300bp",
+  n_pops = 11,
+  seeds = "7357",
+  thread_number = 8
+)
+```
+
+Store setup information.
+
+```{r}
+saveRDS(
+  LGL_baypass_setup_info,
+  "03_results/R_data/LGL_run_baypass_300bp.RDS.bz2",
+  compress = "bzip2"
+)
+```
+
+#### Run analysis
+
+Run core model using wrapper function `core_mode_wrapper()`:
+
+```{r}
+LGL_core_mode_results <- 
+  core_mode_wrapper(LGL_baypass_setup_info, skip_baypass = T)
+```
+
+#### Source Baypass utils
+
+```{R}
+source(LGL_baypass_setup_info$paths$baypass_utils_path)
+```
+
+### Check P-value Behaviour
+
+#### XtXst estimator
+
+Visualize the estimates of the XtXst differentiation measures.
+
+Check behavior of the p-values associated to the XtXst estimator.
+
+```{r}
+lapply(
+  LGL_baypass_setup_info$run_info$seeds,
+  \(x) LGL_core_mode_results[["xtx_estimator"]][[x]] %>% 
+    ggplot(aes(x = 10**(-1 * log10.1.pval.), y = ..density..)) +
+    geom_histogram(bins = 50, boundary = 0) +
+    geom_hline(yintercept = 1) +
+    ggtitle(paste("Seed", x))
+  )
+
+```
+
+##### [OPTIONAL] Correcting for multiple testing
+
+When correcting for multiple testing, p-values should be converted in q-values
+
+Setting FDR (False Discovery Rate) = 0.05 or 0.01
+
+```{r}
+LGL_xtx_qvalues <-
+  lapply(
+    LGL_baypass_setup_info$run_info$seeds,
+    \(x) LGL_core_mode_results[["xtx_estimator"]][[x]] %>% 
+      mutate(pval =  10**(-1 * log10.1.pval.)) %>% 
+      pull(pval) %>% 
+      qvalue(fdr.level = 0.05, pfdr = TRUE)
+    )
+```
+
+Print the summary for every seed
+
+```{r}
+invisible(
+  Map(
+    \(seed, qobj) {
+      cat("\n#####  Seed:", seed, "#####\n")
+      print(summary(qobj))
+      },
+      LGL_baypass_setup_info$run_info$seeds,   # names / labels
+      LGL_xtx_qvalues                          # corresponding q-value objects
+    )
+  )
+```
+
+#### C2 statistic
+
+```{R}
+# Open PDF device
+pdf("03_results/Contrast_analysis/graphs/LGL_C2_pvalue_histograms_300bp.pdf", width = 8, height = 12)
+
+# Loop through each seed and print the plot
+invisible(
+  lapply(
+    LGL_baypass_setup_info$run_info$seeds,
+    function(x) {
+      p <- LGL_core_mode_results[["contrast"]][[x]] %>% 
+        ggplot(aes(x = 10^(-1 * log10.1.pval.), y = ..density..)) +
+        geom_histogram(bins = 50, boundary = 0) +
+        geom_hline(yintercept = 1) +
+        facet_wrap(~CONTRAST, ncol = 1) +
+        ggtitle(paste("Seed", x))
+      
+      print(p)
+    }
+  )
+)
+
+# Close PDF device
+dev.off()
+```
+
+##### [OPTIONAL] Correcting for multiple testing
+
+When correcting for multiple testing, p-values should be converted in q-values
+
+Setting FDR (False Discovery Rate) = 0.05 or 0.01
+
+```{R}
+LGL_c2_qvalues <-
+lapply(
+  LGL_baypass_setup_info$run_info$seeds,
+  \(x) LGL_core_mode_results[["contrast"]][[x]] %>% 
+    mutate(pval =  10**(-1 * log10.1.pval.)) %>% 
+    pull(pval) %>% 
+    qvalue(fdr.level = 0.05, pfdr = TRUE)
+  )
+```
+
+Print the summary for every seed
+
+```{r}
+invisible(
+  Map(
+    \(seed, qobj) {
+      cat("\n#####  Seed:", seed, "#####\n")
+      print(summary(qobj))
+      },
+      LGL_baypass_setup_info$run_info$seeds,   # names / labels
+      LGL_c2_qvalues                          # corresponding q-value objects
+    )
+  )
+```
+
+## Simulate the POD dataset
+
+```{r}
+
+# Estimate beta parameters for the Pi distribution
+LGL_pi_beta <- LGL_core_mode_results$pi_beta_coef[["7357"]]$Mean
+
+# Extract allele counts from your original .baypass genotype file
+LGL_allele_data <- geno2YN(LGL_baypass_setup_info$paths$genofile)
+
+# Simulate 30,000 SNPs based on the estimated parameters
+simulate.baypass(
+  omega.mat = LGL_core_mode_results$omega_matrix[["7357"]],
+  nsnp = 64032,
+  sample.size = LGL_allele_data$NN,
+  beta.pi = LGL_pi_beta,
+  pi.maf = 0,
+  suffix = "LGL_POD_300bp"
+)
+
+# Rename the output file to the proper directory
+#file.rename("G.LGL_POD", "2_BAYPASS_output/LGL_run_baypass3_POD_input/G.LGL_POD")
+```
+
+#### Set up the BayPass POD run
+
+```{r}
+
+LGL_POD_setup_info <- baypass_run_setup(
+  executable_path = "/home/dau2/software/baypass_public-master_3.0/sources/g_baypass",
+  baypass_utils_path = "/home/dau2/software/baypass_public-master_3.0/utils/baypass_utils.R",
+  popfile_path = "/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/LGL_popmap_baypass.txt",
+  envfile_path = "contrast_files/LGL_contrast_file.txt",
+  contrast_path = "contrast_files/LGL_contrast_file.txt",
+  genofile_path = "2_BAYPASS_output/LGL_POD_run_analysis_output/G.LGL_POD_300bp",
+  output_path = "2_BAYPASS_output/LGL_POD_run_analysis_output/0_core_mode_output/seed_7357_mac2_300bp_window/",
+  run_prefix = "LGL_POD_mac2_300bp_window_run",
+  n_pops = 11,
+  seeds = "7357",
+  thread_number = 8
+)
+```
+
+#### Save the setup
+
+```{r}
+
+saveRDS(
+  LGL_POD_setup_info,
+  "03_results/R_data/LGL_POD_mac2_300bp_window_run_setup.RDS.bz2",
+  compress = "bzip2"
+)
+```
+
+#### Run BayPass on the POD dataset
+
+```{r}
+
+LGL_POD_results <- core_mode_wrapper(LGL_POD_setup_info , skip_baypass = F)
+
+```
+
+#### Extract 99th percentile XtXst thresholds per seed
+
+```{r}
+
+LGL_POD_xtxst_thresholds <- lapply(
+  LGL_POD_results$xtx_estimator,
+  \(df) quantile(df$XtXst, probs = 0.99)
+)
+
+LGL_POD_xtxst_thresholds
+```
+
+#### Extract 99th percentile C2 thresholds per seed
+
+```{r}
+LGL_POD_C2_thresholds <- setNames(
+  sapply(
+    LGL_baypass_setup_info$run_info$seeds,
+    \(x) quantile(LGL_POD_results[["contrast"]][[x]][["C2"]], probs = 0.99)
+  ),
+  LGL_baypass_setup_info$run_info$seeds
+)
+```
+
+#### Extract 99th percentile BF thresholds per seed
+
+```{R}
+LGL_POD_BF_thresholds <- setNames(
+  sapply(
+    LGL_baypass_setup_info$run_info$seeds,
+    \(x) quantile(LGL_POD_results[["betai_reg"]][[x]]$BF.dB., probs = 0.99, na.rm = TRUE)
+  ),
+  LGL_baypass_setup_info$run_info$seeds
+)
+```
+
+### Analyze `Baypass` results
+
+##### Check convergence of the covariance matrix
+
+Calculate correlation between the posterior means of the estimated Omega matrix elements across independent runs.
+
+```{R}
+LGL_core_mode_results$lda_omega %>% 
+  bind_rows(.id = "seed") %>%
+  mutate(comparison = paste0(I, " - ", J)) %>% 
+  select(comparison, seed, M_omega_ij) %>% 
+  pivot_wider(names_from = seed, values_from = M_omega_ij) %>% 
+  column_to_rownames("comparison") %>% 
+  cor() 
+```
+
+Visualize covariance matrix using SVD decomposition:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+plot.omega(
+  omega = LGL_core_mode_results[["omega_matrix"]][["7357"]],
+  pop.names = LGL_core_mode_results[["pop_names"]]
+)
+```
+
+Visualize covariance matrix as a correlation plot:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+# Convert to correlation matrix
+corr_mat <- cov2cor(
+  LGL_core_mode_results[["omega_matrix"]][["7357"]]
+)
+
+# Plot correlation
+corrplot(
+  corr_mat,
+  method = "color",
+  mar = c(2, 1, 2, 2) + 0.1,
+  main = expression("Correlation map based on" ~ hat(Omega))
+)
+```
+
+Visualize covariance matrix as a heatmap:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+heatmap(
+  1 - corr_mat,
+  hclustfun = \(x) hclust(x, method = "average"),
+  main = expression("Heatmap of " ~ hat(Omega) ~ "(" * d[ij] * "=1-" * rho[ij] * ")")
+)
+```
+
+Visualize covariance matrix as hierarchical clustering tree:
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+plot(
+  as.phylo(
+    hclust(
+      as.dist(1 - corr_mat**2)
+    )
+  ),
+  type = "p",
+  main = expression(
+    "Hier. clust. tree based on" ~ hat(Omega) ~ "(" * d[ij] * "=1-" * rho[ij] * ")"
+  )
+)
+```
+
+#### XtXst estimator
+
+###### XtXst outliers
+
+```{r}
+#| fig-height: 10
+#| fig-width: 15
+
+LGL_SNP_metadata <- 
+  vcf_vcfr_dataset[["LGL"]]@fix %>% 
+  as.data.frame() %>% 
+  select(CHROM, POS) %>% 
+  mutate(
+    MRK = 1:n(),
+    CHROM_number = as.numeric(str_extract(CHROM, "\\d+")),
+    CHROM_color = case_when(
+      CHROM_number %% 2 == 0 ~ "even",
+      TRUE ~ "odd"
+    )
+  )
+
+names(LGL_POD_xtxst_thresholds) <- as.character(LGL_baypass_setup_info$run_info$seeds)
+
+LGL_xtxst_manhattan_plots <- lapply(
+  LGL_baypass_setup_info$run_info$seeds,
+  function(seed) {
+    # 1. Get BayPass results for this seed
+    snp_data <- LGL_core_mode_results[["xtx_estimator"]][[seed]]
+    
+    # 2. Get corresponding threshold from POD
+    threshold <- LGL_POD_xtxst_thresholds[[as.character(seed)]]
+    
+    # 3. Annotate with outlier flag + SNP metadata
+    snp_data <- snp_data %>%
+      mutate(
+        is_outlier = ifelse(XtXst >= threshold, "outlier", "not outlier")
+      ) %>%
+      left_join(LGL_SNP_metadata, by = "MRK")
+    
+    # 4. Manhattan plot
+    ggplot(snp_data, aes(x = MRK, y = XtXst, color = CHROM_color, size = is_outlier)) +
+      geom_point() +
+      geom_hline(yintercept = threshold, linetype = "dashed", color = "red") +
+      scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+      scale_size_manual(values = c("outlier" = 2, "not outlier" = 0.5)) +
+      labs(
+        title = paste("XtXst Manhattan Plot – Seed", seed),
+        subtitle = paste("Threshold from POD:", round(threshold, 3)),
+        x = "SNP (MRK)",
+        y = "XtXst"
+      ) +
+      guides(color = "none", size = "none") +
+      theme_minimal() +
+      theme(panel.grid = element_blank())
+  }
+)
+
+names(LGL_POD_xtxst_thresholds) <- as.character(LGL_baypass_setup_info$run_info$seeds)
+
+# Print the plots
+
+for (plot in LGL_xtxst_manhattan_plots) {
+  print(plot)
+}
+
+# Save to a PDF
+
+pdf("03_results/graphs/LGL_XtXst_Manhattan_plots", width = 12, height = 6)
+
+for (p in LGL_xtxst_manhattan_plots) {
+  print(p)
+}
+
+dev.off()
+```
+
+###### Extract outliers in a list
+
+```{r}
+
+LGL_xtxst_outliers_per_seed <- lapply(
+  names(LGL_POD_xtxst_thresholds),
+  function(seed) {
+    threshold <- LGL_POD_xtxst_thresholds[[seed]]
+    real_data <- LGL_core_mode_results$xtx_estimator[[seed]]
+    
+    real_data %>%
+      filter(XtXst >= threshold) %>%
+      pull(MRK)  # Pulls the marker IDs
+  }
+) %>% setNames(names(LGL_POD_xtxst_thresholds))
+
+LGL_xtxst_common_outliers <- Reduce(intersect, LGL_xtxst_outliers_per_seed)
+length(LGL_xtxst_common_outliers)
+
+pdf("03_results/graphs/XtX/LGL_XtXst_outliers_VennDiagram.pdf", width = 10, height = 8)
+
+print(
+  ggVennDiagram(
+    LGL_xtxst_outliers_per_seed, 
+    label = "count",
+    label_geom = "text",
+    label_color = "white"
+  ) +
+    labs(title = "Overlap of XtXst Outliers (q-value ≤ 0.01) Across Seeds")
+)
+
+dev.off()
+```
+
+###### Calculate Median XtXst
+
+Calculate median XtXst per MRK across seeds.
+
+```{R}
+LGL_median_XtXst <- LGL_core_mode_results$xtx_estimator %>% 
+  bind_rows(.id = "seed") %>%
+  select(seed, MRK, XtXst) %>% 
+  summarise(Median_XtXst = median(XtXst), .by = MRK) %>% 
+  mutate(
+    is_outlier = ifelse(Median_XtXst >= LGL_POD_xtxst_thresholds[1] , "outlier", "not outlier")
+    )
+```
+
+Create a list with XtXst outliers.
+
+```{R}
+LGL_median_XtXst_outlier_list <- LGL_median_XtXst %>% 
+  filter(is_outlier == "outlier") %>% 
+  pull(MRK)
+```
+
+Visualize the outliers from the Mean_XtXst in the original data using the POD threshold. 
+
+```{r}
+#| fig-width: 10
+
+LGL_median_XtXst %>% 
+  left_join(LGL_SNP_metadata, by = "MRK") %>%
+  ggplot(aes(x = MRK, y = Median_XtXst, color = CHROM_color, size = is_outlier)) +
+      geom_point() +
+      geom_hline(yintercept = as.numeric(LGL_POD_xtxst_thresholds[1]), linetype = "dashed", color = "red") +
+      scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+      scale_size_manual(values = c("outlier" = 1.5, "not outlier" = 0.5)) +
+      labs(
+        title = "Median XtXst Manhattan Plot",
+        x = "SNP (MRK)",
+        y = "Median XtXst"
+      ) +
+      guides(color = "none", size = "none") +
+      theme_minimal() +
+      theme(panel.grid = element_blank())
+
+# Save the figure
+ggsave("03_results/graphs/XtX/LGL_median_XtXst_Manhattan_Plot.pdf", width = 10)
+
+```
+
+#### C2 Statistic
+
+###### Check convergence of the covariance matrix
+
+Calculate correlation between C2 statistics of different runs.
+
+```{R}
+LGL_core_mode_results$contrast %>% 
+  bind_rows(.id = "seed") %>%
+  mutate(comparison = paste0(CONTRAST, " - ", MRK)) %>% 
+  select(comparison, seed, C2) %>% 
+  pivot_wider(names_from = seed, values_from = C2) %>% 
+  column_to_rownames("comparison") %>% 
+  cor() 
+```
+
+###### C2 outliers
+
+Extract outliers by keeping only those above the threshold in every seed.
+
+```{R}
+# Open a new PDF device
+pdf("03_results/Contrast_analysis/graphs/LGL_C2_statistic_Manhattan_plots_300bp.pdf", width = 15, height = 10)
+
+names(LGL_POD_C2_thresholds)
+
+LGL_SNP_metadata <- 
+  vcf_vcfr_dataset[["LGL"]]@fix %>% 
+  as.data.frame() %>% 
+  select(CHROM, POS) %>% 
+  mutate(
+    MRK = 1:64032,
+    CHROM_number = as.numeric(str_extract(CHROM, "\\d+")),
+    CHROM_color = case_when(
+      CHROM_number %% 2 == 0 ~ "even",
+      TRUE ~ "odd"
+    )
+  )
+
+# Loop through all seeds
+invisible(
+  lapply(
+    LGL_baypass_setup_info$run_info$seeds,
+    function(seed) {
+      
+      # 1. Get C2 data for this seed
+      snp_data <- LGL_core_mode_results[["contrast"]][[seed]]
+      
+      # 2. Get threshold for this seed
+      c2_thresh <- LGL_POD_C2_thresholds[[as.character(seed)]]
+
+      # 3. Add outlier flag to SNP table based on M_C2 LGL C2 threshold
+      snp_data <- snp_data %>%
+        mutate(
+            is_outlier = case_when(
+            C2 >= c2_thresh ~ "outlier",
+            TRUE ~ "not outlier"
+  ),
+          CONTRAST = as.character(CONTRAST)
+        ) %>%
+        left_join(LGL_SNP_metadata, by = "MRK") %>%
+        left_join(contrast_key, by = "CONTRAST")  # Add contrast names
+
+      # 4. Plot using ContrastName
+      print(
+        ggplot(snp_data, aes(x = MRK, y = C2, color = CHROM_color, size = is_outlier)) +
+          geom_point() +
+          geom_hline(yintercept = c2_thresh, linetype = "dashed", color = "grey30") +
+          scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+          scale_size_manual(values = c("outlier" = 2, "not outlier" = 1)) +
+          facet_wrap(~ ContrastName, scales = "free_x", ncol = 1) +  # Use readable names
+          labs(
+            title = paste("C2 statistic (Seed", seed, ")"),
+            x = "SNP (MRK)",
+            y = "C2 value"
+          ) +
+          guides(color = "none", size = "none") +
+          theme_minimal() +
+          theme(panel.grid = element_blank())
+      )
+    }
+  )
+)
+
+# Close the PDF device
+dev.off()
+
+```
+
+###### Extract total C2 outliers for each contrast in a list
+
+```{R}
+
+# 1. Get the C2 data for seed 7357
+LGL_snp_data <- LGL_core_mode_results[["contrast"]][["7357"]]
+
+# 2. Get the threshold (99th percentile from PODs)
+LGL_c2_thresh <- as.numeric(LGL_POD_C2_thresholds["7357"])
+
+# 3. Filter SNPs that are outliers
+LGL_C2_outliers_7357 <- LGL_snp_data %>%
+  filter(C2 >= LGL_c2_thresh)
+
+# Optional: just get vector of SNP IDs (MRK)
+LGL_C2_outlier_ids_7357 <- LGL_C2_outliers_7357$MRK
+
+# Optional: save to CSV
+write.csv(LGL_C2_outliers_7357, "03_results/Contrast_analysis/LGL/LGL_C2_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+###### Venn Diagram for the C2 statistic of the 3 contrasts
+
+```{R}
+LGL_C2_venn_diagram_dataset <- LGL_core_mode_results$contrast[["7357"]] %>%
+  mutate(CONTRAST = as.character(CONTRAST)) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  filter(C2 >= LGL_POD_C2_thresholds["7357"]) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/Contrast_analysis/LGL/LGL_C2_VennDiagram_7357_300bp.pdf", width = 8, height = 6)
+
+LGL_C2_VennDiagram_plot <- ggVennDiagram(LGL_C2_venn_diagram_dataset, label = "count", label_color = "white") +
+  labs(title = "C2 Outliers per contrast")
+
+print(LGL_C2_VennDiagram_plot)
+
+dev.off()
+```
+
+###### Extract common C2 outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+LGL_C2_common_outliers <- Reduce(intersect, LGL_C2_venn_diagram_dataset)
+
+LGL_C2_common_outliers_df <- LGL_SNP_metadata %>%
+  filter(MRK %in% LGL_C2_common_outliers)
+
+# Optional: save to CSV
+write.csv(LGL_C2_common_outliers_df, "03_results/Contrast_analysis/LGL/LGL_common_C2_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+##### BF outliers
+
+```{R}
+# Set seed to plot
+seed <- "7357"
+
+# BF threshold for decisive evidence (e.g. Jeffreys’ rule)
+bf_thresh <- 10
+
+# Read BF values (6 contrasts × N SNPs)
+LGL_bf_data <- LGL_core_mode_results$betai_reg[[seed]]$BF.dB.
+LGL_n_contrasts <- length(unique(contrast_key$CONTRAST))
+LGL_n_snps <- length(LGL_bf_data) / LGL_n_contrasts
+
+# Create tibble with BF per SNP LGL contrast
+LGL_BF_df <- tibble(
+  MRK = rep(1:LGL_n_snps, times = LGL_n_contrasts),
+  CONTRAST = as.character(rep(1:LGL_n_contrasts, each = LGL_n_snps)),
+  BF = LGL_bf_data
+) %>%
+  mutate(
+    is_outlier = ifelse(BF >= bf_thresh, "outlier", "not outlier")
+  ) %>%
+  left_join(LGL_SNP_metadata, by = "MRK") %>%
+  left_join(contrast_key, by = "CONTRAST")
+
+# Save to PDF
+pdf("03_results/Contrast_analysis/LGL/LGL_BF_statistic_Manhattan_plot_seed7357_300bp.pdf", width = 15, height = 10)
+
+# Plot
+print(
+  ggplot(LGL_BF_df, aes(x = MRK, y = BF, color = CHROM_color, size = is_outlier)) +
+    geom_point() +
+    geom_hline(yintercept = bf_thresh, linetype = "dashed", color = "black") +
+    scale_color_manual(values = c("odd" = "black", "even" = "grey")) +
+    scale_size_manual(values = c("outlier" = 2, "not outlier" = 1)) +
+    facet_wrap(~ ContrastName, scales = "free_x", ncol = 1) +
+    labs(
+      title = paste("Bayes Factor (BF) Statistic – Seed", seed),
+      x = "SNP (MRK)",
+      y = "BF (dB)"
+    ) +
+    guides(color = "none", size = "none") +
+    theme_minimal() +
+    theme(panel.grid = element_blank())
+)
+
+dev.off()
+```
+
+###### Extract total BF outliers in a list
+
+```{r}
+# 1. Get the BF data for seed 7357
+LGL_BF_snp_data <- LGL_core_mode_results[["betai_reg"]][["7357"]]
+
+# 2. Get the threshold (99th percentile from PODs)
+LGL_bf_thresh <- as.numeric(LGL_POD_BF_thresholds["7357"])
+
+# 3. Add MRK column if needed
+LGL_BF_snp_data <- LGL_BF_snp_data %>%
+  mutate(MRK = 1:n())
+
+# 4. Filter SNPs that are outliers
+LGL_BF_outliers_7357 <- LGL_BF_snp_data %>%
+  filter(BF.dB. >= LGL_bf_thresh)
+
+# Optional: just get vector of SNP IDs (MRK)
+LGL_BF_outlier_ids_7357 <- LGL_BF_outliers_7357$MRK
+
+# Optional: save to CSV
+write.csv(LGL_BF_outliers_7357, "03_results/Contrast_analysis/LGL/LGL_BF_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+###### Venn Diagram for the BF statistic of the 3 contrasts
+
+```{R}
+# Create list of BF outliers per contrast
+LGL_BF_venn_diagram_dataset <- LGL_core_mode_results$betai_reg[["7357"]] %>%
+  mutate(CONTRAST = as.character(COVARIABLE)) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  group_by(ContrastName) %>%
+  mutate(MRK = row_number()) %>%  # safer than rep()
+  ungroup() %>%
+  filter(BF.dB. >= LGL_POD_BF_thresholds["7357"]) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/Contrast_analysis/LGL/LGL_BF_VennDiagram_7357_300bp.pdf", width = 8, height = 6)
+
+LGL_BF_VennDiagram_plot <- ggVennDiagram(LGL_BF_venn_diagram_dataset, label = "count", label_color = "white") +
+  labs(title = "BF Outliers (Seed 7357 – BF ≥ threshold)")
+
+print(LGL_BF_VennDiagram_plot)
+
+dev.off()
+```
+
+###### Extract common BF outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+LGL_BF_common_outliers <- Reduce(intersect, LGL_BF_venn_diagram_dataset)
+
+LGL_BF_common_outliers_df <- LGL_SNP_metadata %>%
+  filter(MRK %in% LGL_BF_common_outliers)
+
+# Optional: save to CSV
+write.csv(LGL_BF_common_outliers_df, "03_results/Contrast_analysis/LGL/LGL_common_BF_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+#### C2 vs BF plot
+
+```{R}
+#|figfig-width: 10
+#|figfig-height: 15
+# Set seed
+seed <- "7357"
+
+# Load BF data for this seed
+LGL_bf_file <- file.path(
+  "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/baypass/2_BAYPASS_output/LGL_run_baypass_300bp_analysis_output/0_core_mode_output/",
+  paste0("seed_", seed),
+  paste0("LGL_run_baypass_300bp_seed", seed, "_core_summary_betai_reg.out")
+)
+
+LGL_bf_values <- read.table(bf_file, header = TRUE)$BF.dB.
+LGL_n_snps <- length(LGL_bf_values)
+LGL_n_contrasts <- 3
+
+LGL_BF_table <- tibble(
+  MRK = rep(1:(LGL_n_snps / LGL_n_contrasts), times = LGL_n_contrasts),
+  CONTRAST = as.character(rep(1:LGL_n_contrasts, each = LGL_n_snps / LGL_n_contrasts)),
+  BF = LGL_bf_values
+) %>%
+  left_join(contrast_key, by = "CONTRAST")
+
+# Load C2 values
+LGL_C2_table <- LGL_core_mode_results[["contrast"]][[seed]] %>%
+  mutate(
+    CONTRAST = as.character(CONTRAST),
+    log10p = log10.1.pval.
+  ) %>%
+  left_join(contrast_key, by = "CONTRAST") %>%
+  select(MRK, ContrastName, C2, log10p)
+
+# Combine BF and C2 values
+LGL_C2_BF_combined <- LGL_C2_table %>%
+  left_join(BF_table, by = c("MRK", "ContrastName"))
+
+# Add outlier flags using empirical threshold
+LGL_C2_threshold <- as.numeric(LGL_POD_C2_thresholds[seed])
+
+LGL_C2_BF_combined <- LGL_C2_BF_combined %>%
+  mutate(
+    C2_outlier = C2 >= LGL_C2_threshold,
+    BF_outlier = BF >= 10,
+    both_outlier = C2_outlier & BF_outlier
+  )
+
+# Optional: extract only double outliers
+LGL_C2_BF_outliers_7357 <- LGL_C2_BF_combined %>% filter(both_outlier)
+
+# Plot
+plot_path <- "03_results/C2_BF/LGL_seed7357_BF_vs_C2_300bp_plot.pdf"
+dir.create(dirname(plot_path), recursive = TRUE, showWarnings = FALSE)
+
+ggplot(LGL_C2_BF_combined, aes(x = BF, y = C2)) +
+  geom_point(aes(color = both_outlier), alpha = 0.7) +
+  facet_wrap(~ ContrastName, ncol = 1) +
+  geom_hline(yintercept = C2_threshold, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = 10, linetype = "dashed", color = "blue") +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+  labs(
+    title = "Bayes Factor vs C2 Statistic",
+    subtitle = "Red = Outliers for BOTH BF and C2",
+    x = "Bayes Factor (BF in dB)",
+    y = "C2 Statistic"
+  ) +
+  guides(color = guide_legend(title = "Outlier (BF & C2)")) +
+  theme_minimal()
+
+# Save plot
+ggsave(plot_path, width = 10, height = 15)
+
+# Join SNP metadata to include POS and CHROM info
+LGL_C2_BF_outliers_7357_position <- LGL_C2_BF_outliers_7357 %>%
+  left_join(LGL_SNP_metadata, by = "MRK")
+
+# Save updated CSV
+write_csv(LGL_C2_BF_outliers_7357_position, "03_results/C2_BF/LGL_seed7357_C2_BF_300bp_outliers_with_POS.csv")
+```
+
+###### Venn Diagram for the C2 x BF statistic of the 3 contrasts
+
+```{R}
+# Create list of MRKs that are outliers in BOTH C2 LGL BF per contrast
+LGL_C2_BF_venn_diagram_dataset <- LGL_C2_BF_combined %>%
+  filter(both_outlier == TRUE) %>%
+  split(.$ContrastName) %>%
+  lapply(\(x) x$MRK)
+
+# Plot Venn Diagram
+pdf("03_results/C2_BF/LGL_C2_BF_VennDiagram_7357_300bp.pdf", width = 12, height = 8)
+
+LGL_C2_BF_VennDiagram_plot <- ggVennDiagram(
+  LGL_C2_BF_venn_diagram_dataset,
+  label = "count",
+  label_color = "white"
+) +
+  labs(title = "C2 x BF Outliers per Contrast")
+
+dev.off()
+```
+
+###### Extract common (INTERSECT) C2 x BF outliers in a list
+
+```{R}
+# Get vector of common outliers across all three contrasts
+LGL_C2_BF_common_outliers <- Reduce(intersect, LGL_C2_BF_venn_diagram_dataset)
+
+LGL_C2_BF_common_outliers_df <- LGL_SNP_metadata %>%
+  filter(MRK %in% LGL_C2_BF_common_outliers)
+
+# Optional: save to CSV
+write.csv(LGL_C2_BF_common_outliers_df, "03_results/C2_BF/LGL_C2_BF_common_outliers_seed7357_300bp.csv", row.names = FALSE)
+```
+
+####### Extract common (UNION) C2 x BF outliers between contrasts in a list
+
+```{R}
+# Load main outlier table
+LGL_C2_BF_total_outliers <- read_csv("03_results/C2_BF/LGL_seed7357_C2_BF_300bp_outliers.csv")
+
+# Split by contrast
+split_outliers <- split(LGL_C2_BF_total_outliers, LGL_C2_BF_total_outliers$ContrastName)
+
+# Define helper function to merge LGL clean columns
+# Helper to get common outliers LGL clean up column names
+LGL_extract_C2_BF_total_outliers <- function(df1, df2) {
+  inner_join(df1, df2, by = "MRK", suffix = c(".1", ".2")) %>%
+    transmute(
+      MRK,
+      ContrastName = ContrastName.1,
+      C2 = C2.1,
+      log10p = log10p.1,
+      BF = BF.1,
+      C2_outlier = C2_outlier.1,
+      BF_outlier = BF_outlier.1,
+      both_outlier = both_outlier.1
+    )
+}
+
+# Compute pairwise intersections
+LGL_UNION_C2_BF_outlier_C1_C2  <- LGL_extract_C2_BF_total_outliers(split_outliers[[1]], split_outliers[[2]])
+LGL_UNION_C2_BF_outlier_C1_C3 <- LGL_extract_C2_BF_total_outliers(split_outliers[[1]], split_outliers[[3]])
+LGL_UNION_C2_BF_outlier_C2_C3 <- LGL_extract_C2_BF_total_outliers(split_outliers[[2]], split_outliers[[3]])
+
+# Export as CSV
+write_csv(LGL_UNION_C2_BF_outlier_C1_C2, "03_results/C2_BF/LGL_C2_BF_common_outliers_C1_C2.csv")
+write_csv(LGL_UNION_C2_BF_outlier_C1_C3, "03_results/C2_BF/LGL_C2_BF_common_outliers_C1_C3.csv")
+write_csv(LGL_UNION_C2_BF_outlier_C2_C3, "03_results/C2_BF/LGL_C2_BF_common_outliers_C2_C3.csv")
+```
+
+#### Compute Local Scores
+
+```{R}
+# Set seed LGL contrast
+seed <- "7357"
+contrast_id <- "3"  # Use "1", "2", or "3"
+
+# 1. SNP position info
+LGL_snp_position <- LGL_SNP_metadata %>%
+  select(CHROM, POS) %>%
+  mutate(POS = as.numeric(POS)) %>%
+  arrange(POS)
+
+# 2. Extract pi values (from summary_pi_xtx.out)
+LGL_snp_pi <- LGL_core_mode_results$xtx_estimator[[seed]]$M_P
+
+# 3. Extract p-values (from summary_contrast.out)
+LGL_snp_pvalues <- LGL_core_mode_results$contrast[[seed]] %>%
+  filter(CONTRAST == contrast_id) %>%
+  pull(log10.1.pval.)
+
+# 4. Compute local scores (LGL plot)
+pdf(paste0("03_results/Local_scores/LGL_local_scores_contrast_", contrast_id, "_seed", seed, "_300bp.pdf"),
+    width = 10, height = 6)
+
+LGL_local_scores <- compute.local.scores(
+  snp.position = LGL_snp_position,
+  snp.pi = LGL_snp_pi,
+  snp.pvalue = LGL_snp_pvalues,
+  manplot = TRUE,
+  min.maf = 0.20,
+  xi = 4,
+  min.nsnp = 0,
+  plot.pvalhist = TRUE
+)
+
+ # Save output tables from compute.local.scores
+ write.csv(LGL_local_scores$res.local.scores,
+          file = paste0("03_results/Local_scores/LGL_local_scores_contrast_", contrast_id, "_seed", seed, "_res_local_scores.csv"),
+         row.names = FALSE)
+
+write.csv(LGL_local_scores$significant.windows,
+          file = paste0("03_results/Local_scores/LGL_local_scores_contrast_", contrast_id, "_seed", seed, "_significant_windows.csv"),
+          row.names = FALSE)
+
+
+dev.off()
+```
+
+
+
+
+
+
+
+
+

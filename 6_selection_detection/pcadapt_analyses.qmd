@@ -1,0 +1,1188 @@
+---
+title: "PCAdapt Analyses"
+format: html
+editor: source
+---
+
+
+# 0. Introduction
+
+```{r}
+# R package **pcadapt** was developed to detect genetic markers involved in biological adaptation. 
+# This package uses statistical tools for outlier detection based on Principal Component Analysis (PCA).
+```
+
+## 0.1. References
+
+```{r}
+# A tutorial for **pcadapt** is available on https://bcm-uga.github.io/pcadapt/articles/pcadapt.html
+# Paper: Florian Privé, Keurcien Luu, Bjarni J Vilhjálmsson, Michael G B Blum, Performing Highly Efficient Genome Scans for Local Adaptation with R Package pcadapt Version 4, Molecular Biology and Evolution, Volume 37, Issue 7, July 2020, Pages 2153–2154, https://doi.org/10.1093/molbev/msaa053
+```
+
+# 1. Install and load libraries
+
+```{r}
+install.packages("pcadapt")
+install.packages("qvalue")
+
+library(qvalue)
+library(pcadapt)
+library(tidyverse)
+```
+
+# 2. Reading genotype data
+
+```{r}
+# Read filtered .vcf files
+AND_vcf_fmiss_0.20_maf_0.20 <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/AND_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.20.vcf.gz.vcf"
+
+AND_vcf_fmiss_0.20_maf_0.15 <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/AND_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.15.vcf.gz.vcf"
+
+AND_vcf_fmiss_0.20_maf_0.10 <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/AND_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.10.vcf.gz.vcf"
+
+AND_vcf_fmiss_0.20_maf_0.05 <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/AND_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.05.vcf.gz.vcf"
+
+BOM_vcf_fmiss_0.20_maf_0.05 <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/BOM_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.05.vcf.gz.vcf"
+
+LML_vcf_fmiss_0.20_maf_0.05 <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/LML_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.05.vcf.gz.vcf"
+
+# We should use the `read.pcadapt` function to convert our .vcf files to the `bed` format
+# `read.pcadapt` converts different types of files to the `bed` format and returns a character string containing the name of the converted file. 
+# This file should be used as input for the **pcadapt** function.
+# Supported formats: “**pcadapt**”, “**lfmm**”, “**vcf**”, “**bed**”, “**ped**”, “**pool**”.
+# **pcadapt** files should have individuals in columns, SNPs in lines, and missing values should be encoded by a single character (e.g. 9) different from 0, 1 or 2.
+
+AND_pcadapt_maf_0.20_fmiss_0.20 <- read.pcadapt(AND_vcf_fmiss_0.20_maf_0.20, type = "vcf")
+AND_pcadapt_maf_0.15_fmiss_0.20 <- read.pcadapt(AND_vcf_fmiss_0.20_maf_0.15, type = "vcf")
+AND_pcadapt_maf_0.10_fmiss_0.20 <- read.pcadapt(AND_vcf_fmiss_0.20_maf_0.10, type = "vcf")
+AND_pcadapt_maf_0.05_fmiss_0.20 <- read.pcadapt(AND_vcf_fmiss_0.20_maf_0.05, type = "vcf")
+
+BOM_pcadapt_maf_0.05_fmiss_0.20 <- read.pcadapt(BOM_vcf_fmiss_0.20_maf_0.05, type = "vcf")
+
+LML_pcadapt_maf_0.05_fmiss_0.20 <- read.pcadapt(LML_vcf_fmiss_0.20_maf_0.05, type = "vcf")
+```
+
+# 2. Load and order popfiles to use in PCA
+
+```{r}
+## sampling sites
+AND_popfile_sampling <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/AND_structure_popfile_sampling_sites.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(AND_popfile_sampling) <- c("id", "pop")
+
+BOM_popfile_sampling <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/BOM_structure_popfile_sampling_sites.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(BOM_popfile_sampling) <- c("id", "pop")
+
+LML_popfile_sampling <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/LGL_structure_popfile_sampling_sites.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(LML_popfile_sampling) <- c("id", "pop")
+
+## landscape level 1 (SSF x LoA)
+AND_popfile_landscape1 <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/AND_structure_popfile_landscape_1.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(AND_popfile_landscape1) <- c("id", "pop")
+
+BOM_popfile_landscape1 <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/BOM_structure_popfile_landscape_1.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(BOM_popfile_landscape1) <- c("id", "pop")
+
+LML_popfile_landscape1 <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/LGL_structure_popfile_landscape_1.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(LML_popfile_landscape1) <- c("id", "pop")
+
+## landscape level 2 (SSF x Near_LoA x Far_LoA)
+AND_popfile_landscape2 <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/AND_structure_popfile_landscape_2.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(AND_popfile_landscape2) <- c("id", "pop")
+
+BOM_popfile_landscape2 <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/BOM_structure_popfile_landscape_2.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(BOM_popfile_landscape2) <- c("id", "pop")
+
+LML_popfile_landscape2 <- read.table("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/01_sample_files/LGL_structure_popfile_landscape_2.txt",
+                      header = FALSE,
+                      stringsAsFactors = FALSE)
+
+colnames(LML_popfile_landscape2) <- c("id", "pop")
+
+# Make sure the samples´ order in .vcf is the same as in the pcadapt file
+## Get samples order from .vcf file
+
+AND_vcf_header <- readLines("/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/AND_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.20.vcf.gz.vcf")
+AND_vcf_samples <- strsplit(AND_vcf_header[grepl("^#CHROM", AND_vcf_header)], "\t")[[1]][-(1:9)]
+AND_vcf_samples <- trimws(AND_vcf_samples)
+
+BOM_vcf_header <- readLines("/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/BOM_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.05.vcf.gz.vcf")
+BOM_vcf_samples <- strsplit(BOM_vcf_header[grepl("^#CHROM", BOM_vcf_header)], "\t")[[1]][-(1:9)]
+BOM_vcf_samples <- trimws(BOM_vcf_samples)
+
+LML_vcf_header <- readLines("/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/VCF_files_rm_assafora_kinship_GQ20_minDP8_genmiss_bialelic_polyonly/VCF_after_tidypopgen_filtering/LML_stk_rm_assafora_minDP8_GQ20_genmiss_bialelic_polyonly_fmiss_0.20_maf_0.05.vcf.gz.vcf")
+LML_vcf_samples <- strsplit(LML_vcf_header[grepl("^#CHROM", LML_vcf_header)], "\t")[[1]][-(1:9)]
+LML_vcf_samples <- trimws(LML_vcf_samples)
+
+# Align with samples order from `read.pcadapt`
+AND_pop_sampling_aligned <- AND_popfile_sampling$pop[match(AND_vcf_samples, AND_popfile_sampling$id)]
+sum(is.na(AND_pop_sampling_aligned))
+
+AND_popfile_landscape1_aligned <- AND_popfile_landscape1$pop[match(AND_vcf_samples, AND_popfile_landscape1$id)]
+sum(is.na(AND_popfile_landscape1_aligned))
+
+AND_popfile_landscape2_aligned <- AND_popfile_landscape2$pop[match(AND_vcf_samples, AND_popfile_landscape2$id)]
+sum(is.na(AND_popfile_landscape2_aligned))
+
+BOM_pop_sampling_aligned <- BOM_popfile_sampling$pop[match(BOM_vcf_samples, BOM_popfile_sampling$id)]
+sum(is.na(BOM_pop_sampling_aligned))
+
+BOM_popfile_landscape1_aligned <- BOM_popfile_landscape1$pop[match(BOM_vcf_samples, BOM_popfile_landscape1$id)]
+sum(is.na(BOM_popfile_landscape1_aligned))
+
+BOM_popfile_landscape2_aligned <- BOM_popfile_landscape2$pop[match(BOM_vcf_samples, BOM_popfile_landscape2$id)]
+sum(is.na(BOM_popfile_landscape2_aligned))
+
+LML_pop_sampling_aligned <- LML_popfile_sampling$pop[match(LML_vcf_samples, LML_popfile_sampling$id)]
+sum(is.na(LML_pop_sampling_aligned))
+
+LML_popfile_landscape1_aligned <- LML_popfile_landscape1$pop[match(LML_vcf_samples, LML_popfile_landscape1$id)]
+sum(is.na(LML_popfile_landscape1_aligned))
+
+LML_popfile_landscape2_aligned <- LML_popfile_landscape2$pop[match(LML_vcf_samples, LML_popfile_landscape2$id)]
+sum(is.na(LML_popfile_landscape2_aligned))
+```
+
+# 3. Choosing the number `K` of Principal Components
+
+```{r}
+# The pcadapt function performs two successive tasks. First, PCA is performed on the centered and scaled genotype matrix.
+# The second stage consists in computing test statistics and p-values based on the correlations between SNPs and the first K principal components (PCs). 
+# To run the function pcadapt, the user should specify the output returned by the function `read.pcadapt` and the number K of principal components to compute.
+# To choose `K`, principal component analysis should first be performed with a large enough number of principal components (e.g. K=20).
+
+# Choosing `K`
+
+## MAF = 0.20
+AND_choosing_K_maf_0.20 <- pcadapt(
+  input = AND_pcadapt_maf_0.20_fmiss_0.20,
+  K = 20,
+  min.maf = 0.20,
+  ploidy = 2
+)
+
+## MAF = 0.15
+AND_choosing_K_maf_0.15 <- pcadapt(
+  input = AND_pcadapt_maf_0.15_fmiss_0.20,
+  K = 20,
+  min.maf = 0.15,
+  ploidy = 2
+)
+
+## MAF = 0.10
+AND_choosing_K_maf_0.10 <- pcadapt(
+  input = AND_pcadapt_maf_0.10_fmiss_0.20,
+  K = 20,
+  min.maf = 0.10,
+  ploidy = 2
+)
+
+## MAF = 0.05
+AND_choosing_K_maf_0.05 <- pcadapt(
+  input = AND_pcadapt_maf_0.05_fmiss_0.20,
+  K = 20,
+  min.maf = 0.05,
+  ploidy = 2
+)
+
+BOM_choosing_K_maf_0.05 <- pcadapt(
+  input = BOM_pcadapt_maf_0.05_fmiss_0.20,
+  K = 20,
+  min.maf = 0.05,
+  ploidy = 2
+)
+
+LML_choosing_K_maf_0.05 <- pcadapt(
+  input = LML_pcadapt_maf_0.05_fmiss_0.20,
+  K = 20,
+  min.maf = 0.05,
+  ploidy = 2
+)
+```
+
+# 4. Plot the best `K`
+
+## 4.1. Screeplot
+
+```{r}
+## The ideal pattern in a scree plot is a steep curve followed by a bend and a straight line. 
+# The eigenvalues that correspond to random variation lie on a straight line 
+# The ones that correspond to population structure lie on a steep curve. 
+# We recommend to keep PCs that correspond to eigenvalues to the left of the straight line (Cattell’s rule).
+
+plot(AND_choosing_K_maf_0.05, option = "screeplot")
+
+plot(BOM_choosing_K_maf_0.05, option = "screeplot")
+
+plot(LML_choosing_K_maf_0.05, option = "screeplot")
+# Based on the screeplot, K = 3 seems right.
+# Same result with different MAF values
+```
+
+## 4.2. Score plot
+
+```{r}
+# Another option to choose the number of PCs is based on the ‘score plot’ that displays population structure. 
+# The score plot displays the projections of the individuals onto the specified principal components. 
+# Using the score plot, the choice of K can be limited to the values of K that correspond to a relevant level of population structure.
+
+# Grouped by sampling sites
+plot(AND_choosing_K_maf_0.20, option = "scores", pop = AND_pop_sampling_aligned)
+
+plot(BOM_choosing_K_maf_0.05, option = "scores", pop = BOM_pop_sampling_aligned)
+
+plot(LML_choosing_K_maf_0.05, option = "scores", pop = LML_pop_sampling_aligned)
+
+# Grouped by landscape level 1 (SSF x LoA)
+plot(AND_choosing_K_maf_0.20, option = "scores", pop = AND_popfile_landscape1_aligned)
+
+plot(BOM_choosing_K_maf_0.05, option = "scores", pop = BOM_popfile_landscape1_aligned)
+
+plot(LML_choosing_K_maf_0.05, option = "scores", pop = LML_popfile_landscape1_aligned)
+
+# Grouped by landscape level 2 (SSF x Near_LoA x Far_LoA)
+plot(AND_choosing_K_maf_0.20, option = "scores", pop = AND_popfile_landscape2_aligned)
+
+plot(BOM_choosing_K_maf_0.05, option = "scores", pop = BOM_popfile_landscape2_aligned)
+
+plot(LML_choosing_K_maf_0.05, option = "scores", pop = LML_popfile_landscape2_aligned)
+
+# Different MAF values did not change the PCA pattern
+```
+
+# 5. Computing the test statistic based on PCA
+
+```{r}
+# For a given SNP, the test statistic is based on the z-scores obtained when regressing SNPs with the `K` principal components.
+
+## MAF = 0.20, K = 1
+AND_K1_maf_0.20 <- pcadapt(
+  input = AND_pcadapt_maf_0.20_fmiss_0.20,
+  K = 1,
+  min.maf = 0.20,
+  ploidy = 2
+)
+
+summary(AND_K1_maf_0.20) 
+
+## MAF = 0.20, K = 2
+AND_K2_maf_0.20 <- pcadapt(
+  input = AND_pcadapt_maf_0.20_fmiss_0.20,
+  K = 2,
+  min.maf = 0.20,
+  ploidy = 2
+)
+
+summary(AND_K2_maf_0.20)
+
+## MAF = 0.20, K = 3
+AND_K3_maf_0.20 <- pcadapt(
+  input = AND_pcadapt_maf_0.20_fmiss_0.20,
+  K = 3,
+  min.maf = 0.20,
+  ploidy = 2
+)
+
+summary(AND_K3_maf_0.20)
+
+## MAF = 0.15, K = 1
+AND_K1_maf_0.15 <- pcadapt(
+  input = AND_pcadapt_maf_0.15_fmiss_0.20,
+  K = 1,
+  min.maf = 0.15,
+  ploidy = 2
+)
+
+summary(AND_K1_maf_0.15)
+
+## MAF = 0.15, K = 2
+AND_K2_maf_0.15 <- pcadapt(
+  input = AND_pcadapt_maf_0.15_fmiss_0.20,
+  K = 2,
+  min.maf = 0.15,
+  ploidy = 2
+)
+
+summary(AND_K2_maf_0.15)
+
+## MAF = 0.15, K = 3
+AND_K3_maf_0.15 <- pcadapt(
+  input = AND_pcadapt_maf_0.15_fmiss_0.20,
+  K = 3,
+  min.maf = 0.15,
+  ploidy = 2
+)
+
+summary(AND_K3_maf_0.15)
+
+## MAF = 0.10, K = 1
+AND_K1_maf_0.10 <- pcadapt(
+  input = AND_pcadapt_maf_0.10_fmiss_0.20,
+  K = 1,
+  min.maf = 0.10,
+  ploidy = 2
+)
+
+summary(AND_K1_maf_0.10)
+
+## MAF = 0.10, K = 2
+AND_K2_maf_0.10 <- pcadapt(
+  input = AND_pcadapt_maf_0.10_fmiss_0.20,
+  K = 2,
+  min.maf = 0.10,
+  ploidy = 2
+)
+
+summary(AND_K2_maf_0.10)
+
+## MAF = 0.10, K = 3
+AND_K3_maf_0.10 <- pcadapt(
+  input = AND_pcadapt_maf_0.10_fmiss_0.20,
+  K = 3,
+  min.maf = 0.10,
+  ploidy = 2
+)
+
+summary(AND_K3_maf_0.10)
+
+## MAF = 0.05, K = 1
+AND_K1_maf_0.05 <- pcadapt(
+  input = AND_pcadapt_maf_0.05_fmiss_0.20,
+  K = 1,
+  min.maf = 0.05,
+  ploidy = 2
+)
+
+summary(AND_K1_maf_0.05)
+
+BOM_K1_maf_0.05 <- pcadapt(
+  input = BOM_pcadapt_maf_0.05_fmiss_0.20,
+  K = 1,
+  min.maf = 0.05,
+  ploidy = 2
+)
+
+summary(BOM_K1_maf_0.05)
+
+LML_K1_maf_0.05 <- pcadapt(
+  input = LML_pcadapt_maf_0.05_fmiss_0.20,
+  K = 1,
+  min.maf = 0.05,
+  ploidy = 2
+)
+
+summary(LML_K1_maf_0.05)
+
+## MAF = 0.05, K = 2
+AND_K2_maf_0.05 <- pcadapt(
+  input = AND_pcadapt_maf_0.05_fmiss_0.20,
+  K = 2,
+  min.maf = 0.05,
+  ploidy = 2
+)
+
+summary(AND_K2_maf_0.05)
+
+## MAF = 0.05, K = 3
+AND_K3_maf_0.05 <- pcadapt(
+  input = AND_pcadapt_maf_0.05_fmiss_0.20,
+  K = 3,
+  min.maf = 0.05,
+  ploidy = 2
+)
+
+summary(AND_K3_maf_0.05)
+```
+
+# 6. Plot the results
+
+## 6.1. Manhattan plot
+
+```{r}
+## MAF = 0.20, K = 1
+AND_manhattan_plot_K1_maf_0.20 <- plot(AND_K1_maf_0.20, option = "manhattan", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.20, K = 2
+AND_manhattan_plot_K2_maf_0.20 <- plot(AND_K2_maf_0.20, option = "manhattan", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.20, K = 3
+AND_manhattan_plot_K3_maf_0.20 <- plot(AND_K3_maf_0.20, option = "manhattan", pop = AND_popfile_landscape2_aligned)
+
+## MAF = 0.15, K = 1
+AND_manhattan_plot_K1_maf_0.15 <- plot(AND_K1_maf_0.15, option = "manhattan", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.15, K = 2
+AND_manhattan_plot_K2_maf_0.15 <- plot(AND_K2_maf_0.15, option = "manhattan", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.15, K = 3
+AND_manhattan_plot_K3_maf_0.15 <- plot(AND_K3_maf_0.15, option = "manhattan", pop = AND_popfile_landscape2_aligned)
+
+## MAF = 0.10, K = 1
+AND_manhattan_plot_K1_maf_0.10 <- plot(AND_K1_maf_0.10, option = "manhattan", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.10, K = 2
+AND_manhattan_plot_K2_maf_0.10 <- plot(AND_K2_maf_0.10, option = "manhattan", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.10, K = 3
+AND_manhattan_plot_K3_maf_0.10 <- plot(AND_K3_maf_0.10, option = "manhattan", pop = AND_popfile_landscape2_aligned)
+
+## MAF = 0.05, K = 1
+AND_manhattan_plot_K1_maf_0.05 <- plot(AND_K1_maf_0.05, option = "manhattan", pop = AND_popfile_landscape1_aligned)
+BOM_manhattan_plot_K1_maf_0.05 <- plot(BOM_K1_maf_0.05, option = "manhattan", pop = BOM_popfile_landscape1_aligned)
+LML_manhattan_plot_K1_maf_0.05 <- plot(LML_K1_maf_0.05, option = "manhattan", pop = LML_popfile_landscape1_aligned)
+
+## MAF = 0.05, K = 2
+AND_manhattan_plot_K2_maf_0.05 <- plot(AND_K2_maf_0.05, option = "manhattan", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.05, K = 3
+AND_manhattan_plot_K3_maf_0.05 <- plot(AND_K3_maf_0.05, option = "manhattan", pop = AND_popfile_landscape2_aligned)
+```
+
+## 6.2. QQplot
+
+```{r}
+## MAF = 0.20, K = 1
+AND_QQ_plot_K1_maf_0.20 <- plot(AND_K1_maf_0.20, option = "qqplot", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.20, K = 2
+AND_QQ_plot_K2_maf_0.20 <- plot(AND_K2_maf_0.20, option = "qqplot", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.20, K = 3
+AND_QQ_plot_K3_maf_0.20 <- plot(AND_K3_maf_0.20, option = "qqplot", pop = AND_popfile_landscape2_aligned)
+
+## MAF = 0.15, K = 1
+AND_QQ_plot_K1_maf_0.15 <- plot(AND_K1_maf_0.15, option = "qqplot", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.15, K = 2
+AND_QQ_plot_K2_maf_0.15 <- plot(AND_K2_maf_0.15, option = "qqplot", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.15, K = 3
+AND_QQ_plot_K3_maf_0.15 <- plot(AND_K3_maf_0.15, option = "qqplot", pop = AND_popfile_landscape2_aligned)
+
+## MAF = 0.10, K = 1
+AND_QQ_plot_K1_maf_0.10 <- plot(AND_K1_maf_0.10, option = "qqplot", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.10, K = 2
+AND_QQ_plot_K2_maf_0.10 <- plot(AND_K2_maf_0.10, option = "qqplot", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.10, K = 3
+AND_QQ_plot_K3_maf_0.10 <- plot(AND_K3_maf_0.10, option = "qqplot", pop = AND_popfile_landscape2_aligned)
+
+## MAF = 0.05, K = 1
+AND_QQ_plot_K1_maf_0.05 <- plot(AND_K1_maf_0.05, option = "qqplot", pop = AND_popfile_landscape1_aligned)
+BOM_QQ_plot_K1_maf_0.05 <- plot(BOM_K1_maf_0.05, option = "qqplot", pop = BOM_popfile_landscape1_aligned)
+LML_QQ_plot_K1_maf_0.05 <- plot(LML_K1_maf_0.05, option = "qqplot", pop = LML_popfile_landscape1_aligned)
+
+## MAF = 0.05, K = 2
+AND_QQ_plot_K2_maf_0.05 <- plot(AND_K2_maf_0.05, option = "qqplot", pop = AND_popfile_landscape1_aligned)
+## MAF = 0.05, K = 3
+AND_QQ_plot_K3_maf_0.05 <- plot(AND_K3_maf_0.05, option = "qqplot", pop = AND_popfile_landscape2_aligned)
+```
+
+# 7. Histograms of the test statistic and of the p-values
+
+```{r}
+# An histogram of p-values confirms that most of the p-values follow an uniform distribution. 
+# The excess of small p-values indicates the presence of outliers.
+
+## MAF = 0.20, K = 2
+hist(AND_K2_maf_0.20$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+## MAF = 0.20, K = 3
+hist(AND_K3_maf_0.20$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+
+## MAF = 0.15, K = 2
+hist(AND_K2_maf_0.15$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+## MAF = 0.15, K = 3
+hist(AND_K3_maf_0.15$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+
+## MAF = 0.10, K = 2
+hist(AND_K2_maf_0.10$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+## MAF = 0.10, K = 3
+hist(AND_K3_maf_0.10$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+
+# MAF = 0.05, K = 1
+hist(AND_K1_maf_0.05$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+hist(BOM_K1_maf_0.05$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+hist(LML_K1_maf_0.05$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+
+## MAF = 0.05, K = 2
+hist(AND_K2_maf_0.05$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+## MAF = 0.05, K = 3
+hist(AND_K3_maf_0.05$pvalues, xlab = "p-values", main = NULL, breaks = 50, col = "orange")
+```
+
+## 7.1. Plotting a histogram of the test statistic `Dj`
+
+```{r}
+## MAF = 0.20, K = 2
+plot(AND_K2_maf_0.20, option = "stat.distribution")
+## MAF = 0.20, K = 3
+plot(AND_K3_maf_0.20, option = "stat.distribution")
+
+## MAF = 0.15, K = 2
+plot(AND_K2_maf_0.15, option = "stat.distribution")
+## MAF = 0.15, K = 3
+plot(AND_K3_maf_0.15, option = "stat.distribution")
+
+## MAF = 0.10, K = 2
+plot(AND_K2_maf_0.10, option = "stat.distribution")
+## MAF = 0.10, K = 3
+plot(AND_K3_maf_0.10, option = "stat.distribution")
+
+# MAF = 0.05, K = 1
+plot(AND_K1_maf_0.05, option = "stat.distribution")
+plot(BOM_K1_maf_0.05, option = "stat.distribution")
+plot(LML_K1_maf_0.05, option = "stat.distribution")
+
+## MAF = 0.05, K = 2
+plot(AND_K2_maf_0.05, option = "stat.distribution")
+## MAF = 0.05, K = 3
+plot(AND_K3_maf_0.05, option = "stat.distribution")
+```
+
+# 8. Choosing a cutoff for outlier detection
+
+## 8.1. q-values (less conservative)
+
+```{r}
+## MAF = 0.20, K = 2, alpha = 0.05
+AND_K2_maf_0.20_qval <- qvalue(AND_K2_maf_0.20$pvalues)$qvalues
+alpha <- 0.05
+AND_K2_maf_0.20_outliers <- which(AND_K2_maf_0.20_qval < alpha)
+length(AND_K2_maf_0.20_outliers)
+# 31 outliers
+
+## MAF = 0.20, K = 3, alpha = 0.05
+AND_K3_maf_0.20_qval <- qvalue(AND_K3_maf_0.20$pvalues)$qvalues
+alpha <- 0.05
+AND_K3_maf_0.20_outliers <- which(AND_K3_maf_0.20_qval < alpha)
+length(AND_K3_maf_0.20_outliers)
+# 48 outliers
+
+## MAF = 0.15, K = 2, alpha = 0.05
+AND_K2_maf_0.15_qval <- qvalue(AND_K2_maf_0.15$pvalues)$qvalues
+alpha <- 0.05
+AND_K2_maf_0.15_outliers <- which(AND_K2_maf_0.15_qval < alpha)
+length(AND_K2_maf_0.15_outliers)
+# 1021 outliers
+
+## MAF = 0.15, K = 3, alpha = 0.05
+AND_K3_maf_0.15_qval <- qvalue(AND_K3_maf_0.15$pvalues)$qvalues
+alpha <- 0.05
+AND_K3_maf_0.15_outliers <- which(AND_K3_maf_0.15_qval < alpha)
+length(AND_K3_maf_0.15_outliers)
+# 213 outliers
+
+## MAF = 0.10, K = 2, alpha = 0.05
+AND_K2_maf_0.10_qval <- qvalue(AND_K2_maf_0.10$pvalues)$qvalues
+alpha <- 0.05
+AND_K2_maf_0.10_outliers <- which(AND_K2_maf_0.10_qval < alpha)
+length(AND_K2_maf_0.10_outliers)
+# 11393 outliers
+
+## MAF = 0.10, K = 3, alpha = 0.05
+AND_K3_maf_0.10_qval <- qvalue(AND_K3_maf_0.10$pvalues)$qvalues
+alpha <- 0.05
+AND_K3_maf_0.10_outliers <- which(AND_K3_maf_0.10_qval < alpha)
+length(AND_K3_maf_0.10_outliers)
+# 3644
+
+## ## MAF = 0.05, K = 1, alpha = 0.05
+AND_K1_maf_0.05_qval <- qvalue(AND_K1_maf_0.05$pvalues)$qvalues
+alpha <- 0.05
+AND_K1_maf_0.05_outliers <- which(AND_K1_maf_0.05_qval < alpha)
+length(AND_K1_maf_0.05_outliers)
+# 27560 outliers
+
+BOM_K1_maf_0.05_qval <- qvalue(BOM_K1_maf_0.05$pvalues)$qvalues
+alpha <- 0.05
+BOM_K1_maf_0.05_outliers <- which(BOM_K1_maf_0.05_qval < alpha)
+length(BOM_K1_maf_0.05_outliers)
+# 12976 outliers
+
+LML_K1_maf_0.05_qval <- qvalue(LML_K1_maf_0.05$pvalues)$qvalues
+alpha <- 0.05
+LML_K1_maf_0.05_outliers <- which(LML_K1_maf_0.05_qval < alpha)
+length(LML_K1_maf_0.05_outliers)
+# 4161 outliers
+
+## MAF = 0.05, K = 2, alpha = 0.05
+AND_K2_maf_0.05_qval <- qvalue(AND_K2_maf_0.05$pvalues)$qvalues
+alpha <- 0.05
+AND_K2_maf_0.05_outliers <- which(AND_K2_maf_0.05_qval < alpha)
+length(AND_K2_maf_0.05_outliers)
+# 33863 outliers
+
+## MAF = 0.05, K = 3, alpha = 0.05
+AND_K3_maf_0.05_qval <- qvalue(AND_K3_maf_0.05$pvalues)$qvalues
+alpha <- 0.05
+AND_K3_maf_0.05_outliers <- which(AND_K3_maf_0.05_qval < alpha)
+length(AND_K3_maf_0.05_outliers)
+# 35311 outliers
+```
+
+## 8.2. Benjamini-Hochberg Procedure (intermediate conservative)
+
+```{r}
+## MAF = 0.20, K = 2, alpha = 0.05
+AND_K2_maf_0.20_padj <- p.adjust(AND_K2_maf_0.20$pvalues,method="BH")
+alpha <- 0.05
+AND_K2_maf_0.20_outliers_padj <- which(AND_K2_maf_0.20_padj < alpha)
+length(AND_K2_maf_0.20_outliers_padj)
+# 23 outliers
+
+## MAF = 0.20, K = 3, alpha = 0.05
+AND_K3_maf_0.20_padj <- p.adjust(AND_K3_maf_0.20$pvalues,method="BH")
+alpha <- 0.05
+AND_K3_maf_0.20_outliers_padj <- which(AND_K3_maf_0.20_padj < alpha)
+length(AND_K3_maf_0.20_outliers_padj)
+# 48 outliers
+
+## MAF = 0.15, K = 2, alpha = 0.05
+AND_K2_maf_0.15_padj <- p.adjust(AND_K2_maf_0.15$pvalues,method="BH")
+alpha <- 0.05
+AND_K2_maf_0.15_outliers_padj <- which(AND_K2_maf_0.15_padj < alpha)
+length(AND_K2_maf_0.15_outliers_padj)
+# 1021 outliers
+
+## MAF = 0.15, K = 3, alpha = 0.05
+AND_K3_maf_0.15_padj <- p.adjust(AND_K3_maf_0.15$pvalues,method="BH")
+alpha <- 0.05
+AND_K3_maf_0.15_outliers_padj <- which(AND_K3_maf_0.15_padj < alpha)
+length(AND_K3_maf_0.15_outliers_padj)
+# 213 outliers
+
+## MAF = 0.10, K = 2, alpha = 0.05
+AND_K2_maf_0.10_padj <- p.adjust(AND_K2_maf_0.10$pvalues,method="BH")
+alpha <- 0.05
+AND_K2_maf_0.10_outliers_padj <- which(AND_K2_maf_0.10_padj < alpha)
+length(AND_K2_maf_0.10_outliers_padj)
+# 11393 outliers
+
+## MAF = 0.10, K = 3, alpha = 0.05
+AND_K3_maf_0.10_padj <- p.adjust(AND_K3_maf_0.10$pvalues,method="BH")
+alpha <- 0.05
+AND_K3_maf_0.10_outliers_padj <- which(AND_K3_maf_0.10_padj < alpha)
+length(AND_K3_maf_0.10_outliers_padj)
+# 3644 outliers
+
+## MAF = 0.05, K = 1, alpha = 0.05
+AND_K1_maf_0.05_padj <- p.adjust(AND_K1_maf_0.05$pvalues,method="BH")
+alpha <- 0.05
+AND_K1_maf_0.05_outliers_padj <- which(AND_K1_maf_0.05_padj < alpha)
+length(AND_K1_maf_0.05_outliers_padj)
+# 27560 outliers
+
+BOM_K1_maf_0.05_padj <- p.adjust(BOM_K1_maf_0.05$pvalues,method="BH")
+alpha <- 0.05
+BOM_K1_maf_0.05_outliers_padj <- which(BOM_K1_maf_0.05_padj < alpha)
+length(BOM_K1_maf_0.05_outliers_padj)
+# 12976 outliers
+
+LML_K1_maf_0.05_padj <- p.adjust(LML_K1_maf_0.05$pvalues,method="BH")
+alpha <- 0.05
+LML_K1_maf_0.05_outliers_padj <- which(LML_K1_maf_0.05_padj < alpha)
+length(LML_K1_maf_0.05_outliers_padj)
+# 4052 outliers
+
+## MAF = 0.05, K = 2, alpha = 0.05
+AND_K2_maf_0.05_padj <- p.adjust(AND_K2_maf_0.05$pvalues,method="BH")
+alpha <- 0.05
+AND_K2_maf_0.05_outliers_padj <- which(AND_K2_maf_0.05_padj < alpha)
+length(AND_K2_maf_0.05_outliers_padj)
+# 33863 outliers
+
+## MAF = 0.05, K = 3, alpha = 0.05
+AND_K3_maf_0.05_padj <- p.adjust(AND_K3_maf_0.05$pvalues,method="BH")
+alpha <- 0.05
+AND_K3_maf_0.05_outliers_padj <- which(AND_K3_maf_0.05_padj < alpha)
+length(AND_K3_maf_0.05_outliers_padj)
+# 35311 outliers
+```
+
+## 8.3. Bonferroni correction (more conservative)
+
+```{r}
+## MAF = 0.20, K = 1, alpha = 0.05
+AND_K1_maf_0.20_padj_bonferroni <- p.adjust(AND_K1_maf_0.20$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K1_maf_0.20_outliers_padj_bonferroni <- which(AND_K1_maf_0.20_padj_bonferroni < alpha)
+length(AND_K1_maf_0.20_outliers_padj_bonferroni)
+# 8 outliers
+
+## MAF = 0.20, K = 2, alpha = 0.05
+AND_K2_maf_0.20_padj_bonferroni <- p.adjust(AND_K2_maf_0.20$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K2_maf_0.20_outliers_padj_bonferroni <- which(AND_K2_maf_0.20_padj_bonferroni < alpha)
+length(AND_K2_maf_0.20_outliers_padj_bonferroni)
+# 15 outliers
+
+## MAF = 0.20, K = 3, alpha = 0.05
+AND_K3_maf_0.20_padj_bonferroni <- p.adjust(AND_K3_maf_0.20$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K3_maf_0.20_outliers_padj_bonferroni <- which(AND_K3_maf_0.20_padj_bonferroni < alpha)
+length(AND_K3_maf_0.20_outliers_padj_bonferroni)
+# 36 outliers
+
+## MAF = 0.15, K = 1, alpha = 0.05
+AND_K1_maf_0.15_padj_bonferroni <- p.adjust(AND_K1_maf_0.15$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K1_maf_0.15_outliers_padj_bonferroni <- which(AND_K1_maf_0.15_padj_bonferroni < alpha)
+length(AND_K1_maf_0.15_outliers_padj_bonferroni)
+# 224 outliers
+
+## MAF = 0.15, K = 2, alpha = 0.05
+AND_K2_maf_0.15_padj_bonferroni <- p.adjust(AND_K2_maf_0.15$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K2_maf_0.15_outliers_padj_bonferroni <- which(AND_K2_maf_0.15_padj_bonferroni < alpha)
+length(AND_K2_maf_0.15_outliers_padj_bonferroni)
+# 70 outliers
+
+## MAF = 0.15, K = 3, alpha = 0.05
+AND_K3_maf_0.15_padj_bonferroni <- p.adjust(AND_K3_maf_0.15$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K3_maf_0.15_outliers_padj_bonferroni <- which(AND_K3_maf_0.15_padj_bonferroni < alpha)
+length(AND_K3_maf_0.15_outliers_padj_bonferroni)
+# 49 outliers
+
+## MAF = 0.10, K = 1, alpha = 0.05
+AND_K1_maf_0.10_padj_bonferroni <- p.adjust(AND_K1_maf_0.10$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K1_maf_0.10_outliers_padj_bonferroni <- which(AND_K1_maf_0.10_padj_bonferroni < alpha)
+length(AND_K1_maf_0.10_outliers_padj_bonferroni)
+# 4167 outliers
+
+## MAF = 0.10, K = 2, alpha = 0.05
+AND_K2_maf_0.10_padj_bonferroni <- p.adjust(AND_K2_maf_0.10$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K2_maf_0.10_outliers_padj_bonferroni <- which(AND_K2_maf_0.10_padj_bonferroni < alpha)
+length(AND_K2_maf_0.10_outliers_padj_bonferroni)
+# 769 outliers
+
+## MAF = 0.10, K = 3, alpha = 0.05
+AND_K3_maf_0.10_padj_bonferroni <- p.adjust(AND_K3_maf_0.10$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K3_maf_0.10_outliers_padj_bonferroni <- which(AND_K3_maf_0.10_padj_bonferroni < alpha)
+length(AND_K3_maf_0.10_outliers_padj_bonferroni)
+# 248 outliers
+
+## MAF = 0.05, K = 1, alpha = 0.05
+AND_K1_maf_0.05_padj_bonferroni <- p.adjust(AND_K1_maf_0.05$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K1_maf_0.05_outliers_padj_bonferroni <- which(AND_K1_maf_0.05_padj_bonferroni < alpha)
+length(AND_K1_maf_0.05_outliers_padj_bonferroni)
+# 17954 outliers
+
+BOM_K1_maf_0.05_padj_bonferroni <- p.adjust(BOM_K1_maf_0.05$pvalues,method="bonferroni")
+alpha <- 0.05
+BOM_K1_maf_0.05_outliers_padj_bonferroni <- which(BOM_K1_maf_0.05_padj_bonferroni < alpha)
+length(BOM_K1_maf_0.05_outliers_padj_bonferroni)
+# 9954 outliers
+
+LML_K1_maf_0.05_padj_bonferroni <- p.adjust(LML_K1_maf_0.05$pvalues,method="bonferroni")
+alpha <- 0.05
+LML_K1_maf_0.05_outliers_padj_bonferroni <- which(LML_K1_maf_0.05_padj_bonferroni < alpha)
+length(LML_K1_maf_0.05_outliers_padj_bonferroni)
+# 521 outliers
+
+## MAF = 0.05, K = 2, alpha = 0.05
+AND_K2_maf_0.05_padj_bonferroni <- p.adjust(AND_K2_maf_0.05$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K2_maf_0.05_outliers_padj_bonferroni <- which(AND_K2_maf_0.05_padj_bonferroni < alpha)
+length(AND_K2_maf_0.05_outliers_padj_bonferroni)
+# 14020 outliers
+
+## MAF = 0.05, K = 3, alpha = 0.05
+AND_K3_maf_0.05_padj_bonferroni <- p.adjust(AND_K3_maf_0.05$pvalues,method="bonferroni")
+alpha <- 0.05
+AND_K3_maf_0.05_outliers_padj_bonferroni <- which(AND_K3_maf_0.05_padj_bonferroni < alpha)
+length(AND_K3_maf_0.05_outliers_padj_bonferroni)
+# 8859 outliers
+```
+
+# 9. Save outliers in .csv with CHR and POS info
+
+## 9.1. Build VCF map
+
+```{r}
+make_vcf_map <- function(vcf_file) {
+  vcf_lines <- readLines(vcf_file)
+  vcf_records <- vcf_lines[!grepl("^#", vcf_lines)]
+  vcf_records <- strsplit(vcf_records, "\t")
+
+  data.frame(
+    SNP_index = seq_along(vcf_records),
+    CHR = vapply(vcf_records, `[`, character(1), 1),
+    POS = as.numeric(vapply(vcf_records, `[`, character(1), 2)),
+    ID  = vapply(vcf_records, `[`, character(1), 3),
+    stringsAsFactors = FALSE
+  )
+}
+```
+
+## 9.2. Create the VCF maps
+
+```{r}
+vcf_map_0.20 <- make_vcf_map(AND_vcf_fmiss_0.20_maf_0.20)
+vcf_map_0.15 <- make_vcf_map(AND_vcf_fmiss_0.20_maf_0.15)
+vcf_map_0.10 <- make_vcf_map(AND_vcf_fmiss_0.20_maf_0.10)
+vcf_map_0.05 <- make_vcf_map(AND_vcf_fmiss_0.20_maf_0.05)
+
+vcf_map_0.20 <- make_vcf_map(BOM_vcf_fmiss_0.20_maf_0.20)
+vcf_map_0.15 <- make_vcf_map(BOM_vcf_fmiss_0.20_maf_0.15)
+vcf_map_0.10 <- make_vcf_map(BOM_vcf_fmiss_0.20_maf_0.10)
+vcf_map_0.05 <- make_vcf_map(BOM_vcf_fmiss_0.20_maf_0.05)
+
+vcf_map_0.20 <- make_vcf_map(LML_vcf_fmiss_0.20_maf_0.20)
+vcf_map_0.15 <- make_vcf_map(LML_vcf_fmiss_0.20_maf_0.15)
+vcf_map_0.10 <- make_vcf_map(LML_vcf_fmiss_0.20_maf_0.10)
+vcf_map_0.05 <- make_vcf_map(LML_vcf_fmiss_0.20_maf_0.05)
+```
+
+## 9.3. Function to extract Bonferroni outliers
+
+```{r}
+extract_bonferroni_outliers <- function(pcadapt_obj, vcf_map, alpha = 0.05) {
+  
+  results <- data.frame(
+    SNP_index = seq_along(pcadapt_obj$pvalues),
+    pvalue = pcadapt_obj$pvalues,
+    maf = pcadapt_obj$maf,
+    stat = pcadapt_obj$stat,
+    chi2 = pcadapt_obj$chi2.stat
+  )
+  
+  # remove loci with NA p-values (excluded internally by pcadapt)
+  results <- results[!is.na(results$pvalue), ]
+  
+  # Bonferroni correction
+  results$padj_bonferroni <- p.adjust(results$pvalue, method = "bonferroni")
+  
+  # join CHR, POS, ID from VCF
+  results <- merge(results, vcf_map, by = "SNP_index", all.x = TRUE)
+  
+  # reorder columns
+  results <- results[, c("SNP_index", "ID", "CHR", "POS", "pvalue", "padj_bonferroni", "maf", "stat", "chi2")]
+  
+  # keep only Bonferroni-significant outliers
+  outliers <- results[results$padj_bonferroni < alpha, ]
+  
+  return(outliers)
+}
+```
+
+## 9.4. Function to extract Benjamini-Hochberg outliers
+
+```{r}
+extract_BH_outliers <- function(pcadapt_obj, vcf_map, alpha = 0.05) {
+  
+  results <- data.frame(
+    SNP_index = seq_along(pcadapt_obj$pvalues),
+    pvalue = pcadapt_obj$pvalues,
+    maf = pcadapt_obj$maf,
+    stat = pcadapt_obj$stat,
+    chi2 = pcadapt_obj$chi2.stat
+  )
+  
+  # remove loci with NA p-values (excluded internally by pcadapt)
+  results <- results[!is.na(results$pvalue), ]
+  
+  # Benjamini-Hochberg correction
+  results$padj_BH <- p.adjust(results$pvalue, method = "BH")
+  
+  # join CHR, POS, ID from VCF
+  results <- merge(results, vcf_map, by = "SNP_index", all.x = TRUE)
+  
+  # reorder columns
+  results <- results[, c("SNP_index", "ID", "CHR", "POS", "pvalue", "padj_BH", "maf", "stat", "chi2")]
+  
+  # keep only BH-significant outliers
+  outliers <- results[results$padj_BH < alpha, ]
+  
+  return(outliers)
+}
+```
+
+## 9.5. Function to extract qvalue outliers
+
+```{r}
+extract_qvalue_outliers <- function(pcadapt_obj, vcf_map, alpha = 0.05) {
+  
+  results <- data.frame(
+    SNP_index = seq_along(pcadapt_obj$pvalues),
+    pvalue = pcadapt_obj$pvalues,
+    maf = pcadapt_obj$maf,
+    stat = pcadapt_obj$stat,
+    chi2 = pcadapt_obj$chi2.stat
+  )
+  
+  # remove loci with NA p-values
+  results <- results[!is.na(results$pvalue), ]
+  
+  # compute q-values
+  results$qvalue <- qvalue(results$pvalue)$qvalues
+  
+  # join CHR, POS, ID
+  results <- merge(results, vcf_map, by = "SNP_index", all.x = TRUE)
+  
+  # reorder columns
+  results <- results[, c("SNP_index", "ID", "CHR", "POS", "pvalue", "qvalue", "maf", "stat", "chi2")]
+  
+  # filter outliers
+  outliers <- results[results$qvalue < alpha, ]
+  
+  return(outliers)
+}
+```
+
+## 9.6. Extract and save the Bonferroni outlier tables
+
+```{r}
+# MAF 0.20, K = 1
+AND_K1_maf_0.20_bonferroni_df <- extract_bonferroni_outliers(AND_K1_maf_0.20, vcf_map_0.20)
+write.csv(AND_K1_maf_0.20_bonferroni_df, "AND_K1_maf_0.20_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.20, K =2
+AND_K2_maf_0.20_bonferroni_df <- extract_bonferroni_outliers(AND_K2_maf_0.20, vcf_map_0.20)
+write.csv(AND_K2_maf_0.20_bonferroni_df, "AND_K2_maf_0.20_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.20, K =3
+AND_K3_maf_0.20_bonferroni_df <- extract_bonferroni_outliers(AND_K3_maf_0.20, vcf_map_0.20)
+write.csv(AND_K3_maf_0.20_bonferroni_df, "AND_K3_maf_0.20_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 1
+AND_K1_maf_0.15_bonferroni_df <- extract_bonferroni_outliers(AND_K1_maf_0.15, vcf_map_0.15)
+write.csv(AND_K1_maf_0.15_bonferroni_df, "AND_K1_maf_0.15_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 2
+AND_K2_maf_0.15_bonferroni_df <- extract_bonferroni_outliers(AND_K2_maf_0.15, vcf_map_0.15)
+write.csv(AND_K2_maf_0.15_bonferroni_df, "AND_K2_maf_0.15_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 3
+AND_K3_maf_0.15_bonferroni_df <- extract_bonferroni_outliers(AND_K3_maf_0.15, vcf_map_0.15)
+write.csv(AND_K3_maf_0.15_bonferroni_df, "AND_K3_maf_0.15_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 1
+AND_K1_maf_0.10_bonferroni_df <- extract_bonferroni_outliers(AND_K1_maf_0.10, vcf_map_0.10)
+write.csv(AND_K1_maf_0.10_bonferroni_df, "AND_K1_maf_0.10_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 2
+AND_K2_maf_0.10_bonferroni_df <- extract_bonferroni_outliers(AND_K2_maf_0.10, vcf_map_0.10)
+write.csv(AND_K2_maf_0.10_bonferroni_df, "AND_K2_maf_0.10_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 3
+AND_K3_maf_0.10_bonferroni_df <- extract_bonferroni_outliers(AND_K3_maf_0.10, vcf_map_0.10)
+write.csv(AND_K3_maf_0.10_bonferroni_df, "AND_K3_maf_0.10_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+AND_K1_maf_0.05_bonferroni_df <- extract_bonferroni_outliers(AND_K1_maf_0.05, vcf_map_0.05)
+write.csv(AND_K1_maf_0.05_bonferroni_df, "AND_K1_maf_0.05_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+BOM_K1_maf_0.05_bonferroni_df <- extract_bonferroni_outliers(BOM_K1_maf_0.05, vcf_map_0.05)
+write.csv(BOM_K1_maf_0.05_bonferroni_df, "Bombus_terrestris_results/PCAdapt_bonferroni_correction_outliers/K1/BOM_K1_maf_0.05_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+LML_K1_maf_0.05_bonferroni_df <- extract_bonferroni_outliers(LML_K1_maf_0.05, vcf_map_0.05)
+write.csv(LML_K1_maf_0.05_bonferroni_df, "Lasioglossum_malachurum_results/PCAdapt_bonferroni_correction_outliers/K1/LML_K1_maf_0.05_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 2
+AND_K2_maf_0.05_bonferroni_df <- extract_bonferroni_outliers(AND_K2_maf_0.05, vcf_map_0.05)
+write.csv(AND_K2_maf_0.05_bonferroni_df, "AND_K2_maf_0.05_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 3
+AND_K3_maf_0.05_bonferroni_df <- extract_bonferroni_outliers(AND_K3_maf_0.05, vcf_map_0.05)
+write.csv(AND_K3_maf_0.05_bonferroni_df, "AND_K3_maf_0.05_bonferroni_outliers_with_CHR_POS.csv", row.names = FALSE)
+```
+
+## 9.7. Extract and save the Benjamini-Hochberg outlier tables
+
+```{r}
+# MAF 0.20, K = 1
+AND_K1_maf_0.20_BH_df <- extract_BH_outliers(AND_K1_maf_0.20, vcf_map_0.20)
+write.csv(AND_K1_maf_0.20_BH_df, "AND_K1_maf_0.20_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.20, K = 2
+AND_K2_maf_0.20_BH_df <- extract_BH_outliers(AND_K2_maf_0.20, vcf_map_0.20)
+write.csv(AND_K2_maf_0.20_BH_df, "AND_K2_maf_0.20_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.20, K = 3
+AND_K3_maf_0.20_BH_df <- extract_BH_outliers(AND_K3_maf_0.20, vcf_map_0.20)
+write.csv(AND_K3_maf_0.20_BH_df, "AND_K3_maf_0.20_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 1
+AND_K1_maf_0.15_BH_df <- extract_BH_outliers(AND_K1_maf_0.15, vcf_map_0.15)
+write.csv(AND_K1_maf_0.15_BH_df, "AND_K1_maf_0.15_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 2
+AND_K2_maf_0.15_BH_df <- extract_BH_outliers(AND_K2_maf_0.15, vcf_map_0.15)
+write.csv(AND_K2_maf_0.15_BH_df, "AND_K2_maf_0.15_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 3
+AND_K3_maf_0.15_BH_df <- extract_BH_outliers(AND_K3_maf_0.15, vcf_map_0.15)
+write.csv(AND_K3_maf_0.15_BH_df, "AND_K3_maf_0.15_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 1
+AND_K1_maf_0.10_BH_df <- extract_BH_outliers(AND_K1_maf_0.10, vcf_map_0.10)
+write.csv(AND_K1_maf_0.10_BH_df, "AND_K1_maf_0.10_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 2
+AND_K2_maf_0.10_BH_df <- extract_BH_outliers(AND_K2_maf_0.10, vcf_map_0.10)
+write.csv(AND_K2_maf_0.10_BH_df, "AND_K2_maf_0.10_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 3
+AND_K3_maf_0.10_BH_df <- extract_BH_outliers(AND_K3_maf_0.10, vcf_map_0.10)
+write.csv(AND_K3_maf_0.10_BH_df, "AND_K3_maf_0.10_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+AND_K1_maf_0.05_BH_df <- extract_BH_outliers(AND_K1_maf_0.05, vcf_map_0.05)
+write.csv(AND_K1_maf_0.05_BH_df, "AND_K1_maf_0.05_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+BOM_K1_maf_0.05_BH_df <- extract_BH_outliers(BOM_K1_maf_0.05, vcf_map_0.05)
+write.csv(BOM_K1_maf_0.05_BH_df, "Bombus_terrestris_results/PCAdapt_benjamini_hochberg_correction_outliers/K1/BOM_K1_maf_0.05_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+LML_K1_maf_0.05_BH_df <- extract_BH_outliers(LML_K1_maf_0.05, vcf_map_0.05)
+write.csv(LML_K1_maf_0.05_BH_df, "Lasioglossum_malachurum_results/PCAdapt_benjamini_hochberg_correction_outliers/K1/LML_K1_maf_0.05_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 2
+AND_K2_maf_0.05_BH_df <- extract_BH_outliers(AND_K2_maf_0.05, vcf_map_0.05)
+write.csv(AND_K2_maf_0.05_BH_df, "AND_K2_maf_0.05_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 3
+AND_K3_maf_0.05_BH_df <- extract_BH_outliers(AND_K3_maf_0.05, vcf_map_0.05)
+write.csv(AND_K3_maf_0.05_BH_df, "AND_K3_maf_0.05_BH_outliers_with_CHR_POS.csv", row.names = FALSE)
+```
+
+## 9.8. Extract and save the qvalue outlier tables
+
+```{r}
+# MAF 0.20, K = 1
+AND_K1_maf_0.20_qval_df <- extract_qvalue_outliers(AND_K1_maf_0.20, vcf_map_0.20)
+write.csv(AND_K1_maf_0.20_qval_df, "AND_K1_maf_0.20_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.20, K = 2
+AND_K2_maf_0.20_qval_df <- extract_qvalue_outliers(AND_K2_maf_0.20, vcf_map_0.20)
+write.csv(AND_K2_maf_0.20_qval_df, "AND_K2_maf_0.20_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.20, K = 3
+AND_K3_maf_0.20_qval_df <- extract_qvalue_outliers(AND_K3_maf_0.20, vcf_map_0.20)
+write.csv(AND_K3_maf_0.20_qval_df, "AND_K3_maf_0.20_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 1
+AND_K1_maf_0.15_qval_df <- extract_qvalue_outliers(AND_K1_maf_0.15, vcf_map_0.15)
+write.csv(AND_K1_maf_0.15_qval_df, "AND_K1_maf_0.15_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 2
+AND_K2_maf_0.15_qval_df <- extract_qvalue_outliers(AND_K2_maf_0.15, vcf_map_0.15)
+write.csv(AND_K2_maf_0.15_qval_df, "AND_K2_maf_0.15_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.15, K = 3
+AND_K3_maf_0.15_qval_df <- extract_qvalue_outliers(AND_K3_maf_0.15, vcf_map_0.15)
+write.csv(AND_K3_maf_0.15_qval_df, "AND_K3_maf_0.15_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 1
+AND_K1_maf_0.10_qval_df <- extract_qvalue_outliers(AND_K1_maf_0.10, vcf_map_0.10)
+write.csv(AND_K1_maf_0.10_qval_df, "AND_K1_maf_0.10_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 2
+AND_K2_maf_0.10_qval_df <- extract_qvalue_outliers(AND_K2_maf_0.10, vcf_map_0.10)
+write.csv(AND_K2_maf_0.10_qval_df, "AND_K2_maf_0.10_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.10, K = 3
+AND_K3_maf_0.10_qval_df <- extract_qvalue_outliers(AND_K3_maf_0.10, vcf_map_0.10)
+write.csv(AND_K3_maf_0.10_qval_df, "AND_K3_maf_0.10_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+AND_K1_maf_0.05_qval_df <- extract_qvalue_outliers(AND_K1_maf_0.05, vcf_map_0.05)
+write.csv(AND_K1_maf_0.05_qval_df, "AND_K1_maf_0.05_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+BOM_K1_maf_0.05_qval_df <- extract_qvalue_outliers(BOM_K1_maf_0.05, vcf_map_0.05)
+write.csv(BOM_K1_maf_0.05_qval_df, "Bombus_terrestris_results/PCAdapt_qvalues_correction_outliers/K1/BOM_K1_maf_0.05_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 1
+LML_K1_maf_0.05_qval_df <- extract_qvalue_outliers(LML_K1_maf_0.05, vcf_map_0.05)
+write.csv(LML_K1_maf_0.05_qval_df, "Lasioglossum_malachurum_results/PCAdapt_qvalues_correction_outliers/K1/LML_K1_maf_0.05_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 2
+AND_K2_maf_0.05_qval_df <- extract_qvalue_outliers(AND_K2_maf_0.05, vcf_map_0.05)
+write.csv(AND_K2_maf_0.05_qval_df, "AND_K2_maf_0.05_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+
+# MAF 0.05, K = 3
+AND_K3_maf_0.05_qval_df <- extract_qvalue_outliers(AND_K3_maf_0.05, vcf_map_0.05)
+write.csv(AND_K3_maf_0.05_qval_df, "AND_K3_maf_0.05_qvalue_outliers_with_CHR_POS.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
