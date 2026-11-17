@@ -1,0 +1,1536 @@
+---
+title: "Environmental and Land Use Data"
+format: 
+  html:
+    theme: flatly
+    grid:
+      margin-width: 100px
+    toc: true
+    toc-float: true
+    toc-location: left
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-overflow: wrap
+    self-contained: true
+execute:
+  warning: false
+  cache: true
+include-in-header:
+  - text: |
+      <style>
+      .cell-output-stdout code {
+        word-break: break-wor !important;
+        white-space: pre-wrap !important;
+      }
+      </style>
+---
+
+# Setup
+
+Install packages:
+```{r}
+install.packages("svglite")
+```
+
+Load packages:
+
+```{r setup}
+package_list <- c(
+  'tidyverse', 'terra', 'sf', 'landscapemetrics', "parallel", "DT", "corrplot",
+  "FactoMineR", "factoextra", "broom", "ggrepel", "svglite"
+  )
+
+invisible(
+  lapply(
+    package_list,
+    require,
+    character.only = TRUE
+  )
+)
+```
+
+Source functions.
+
+```{r}
+invisible(
+  lapply(
+    list.files('functions/', full.names = TRUE),
+    source)
+  )
+```
+
+
+# Loading Input Data
+
+Get input file locations.
+
+```{r}
+# location of sample coordinate file
+#sample_coordinate_location <- "input_data/00_sample_data/samples_coords.csv"
+
+# location of sample files
+sample_file_location <-
+  "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/environmental_data/input_data/00_sample_data/ALL_samples_metadata_complete.csv"
+```
+
+## Sample Metadata input
+
+Load and tidy sample coordinate data. This table contains data for all samples, even those not used in the SSF analysis.
+
+```{r}
+sample_metadata <- read.csv(sample_file_location)
+```
+
+Create a separate dataframe with only poll data.
+
+```{r}
+final_poll_metadata <- sample_metadata %>%
+  select(poll, location, landscape_level_1, landscape_level_2, LAT, LONG) %>%
+  distinct() %>%
+  arrange(poll)
+
+final_poll_metadata %>% datatable()
+```
+
+# Land Use Analysis
+
+## Extract Landscape Metrics
+
+### Read and Tidy Land Use Data
+
+Load land use data for Portugal. 
+The merged raster was created from Sentinel rasters '29S' and '29T' with `gdal` in `merge_sentinel_rasters.sh`.
+
+```{r}
+sentinel_landuse_raster = rast(
+  'input_data/01_raster_data/00_sentinel_land_use_rasters/sentinel_29S_29T_joined.tif', 
+  )
+```
+
+Add names to land use classes.
+
+```{r}
+# create dataframe with id - class key
+land_use_classes <- data.frame(
+  id = c(1, 2, 4, 5, 7, 8, 9, 10, 11),
+  landuse = c(
+    "Water", "Trees", "Flooded vegetation", "Crops", "Built Area",
+    "Bare ground", "Snow/Ice", "Clouds", "Rangeland"
+    )
+  )
+
+# add info to raster
+levels(sentinel_landuse_raster) <- land_use_classes
+```
+
+Plot raster.
+
+```{r}
+plot(sentinel_landuse_raster)
+```
+
+### Create Rasters for Each Sampling Landscape
+
+Create a 1 km buffer around each geographical coordinate.
+
+```{r}
+# convert coordinates for each poll into a SpatVector object
+poll_coords_sv = vect(
+  final_poll_metadata, 
+  geom = c('LONG' ,'LAT'),
+  crs = "EPSG:4326"
+  )
+
+# check if names were stored
+poll_coords_sv$poll
+
+# coordinate reference system must match that of the land use raster
+# it is easier to re-project vector than re-project the raster
+poll_coords_sv = project(x = poll_coords_sv, crs(sentinel_landuse_raster))
+
+# create 1 km buffers around each point
+poll_buffers_sv = buffer(poll_coords_sv, width = 1000)
+```
+
+Use buffer area to crop the land use raster, creating 78.54 km² landscape for each poll.
+
+```{r}
+# create a raster for each poll and store them in a list
+poll_landuse_raster_list <- lapply(
+  1:nrow(poll_buffers_sv),
+  \(x) crop_raster_with_buffer(poll_buffers_sv[x, 1], sentinel_landuse_raster)
+  )
+
+# set list entry names
+names(poll_landuse_raster_list) <- poll_buffers_sv$poll
+
+
+```
+
+
+```{r}
+for (poll in names(poll_landuse_raster_list)) {
+  
+  jpeg(filename = paste0("results/poll_landscape_buffers/", poll, ".jpg"))
+  poll_landuse_raster_list[[poll]] %>% 
+    plot(
+      main = poll,
+      plg = list(title="Land Use Class"))
+  dev.off()
+  
+}
+```
+
+
+### Extract Landscape Metrics for Each Sampling Landscape
+
+Check the input landscapes.
+
+```{r}
+check_landscape(poll_landuse_raster_list) %>% datatable()
+```
+
+Create list of `landscapemetrics` functions to use on our landscapes.
+
+```{r}
+landscapemetrics_function_list <- c(
+  lsm_l_area_cv, lsm_l_area_mn, lsm_l_area_sd, lsm_l_cohesion, lsm_l_condent,
+  lsm_l_contag, lsm_l_contig_cv, lsm_l_contig_mn, lsm_l_contig_sd, lsm_l_ed,
+  lsm_l_ent, lsm_l_iji, lsm_l_joinent,
+  lsm_l_lpi, lsm_l_np, lsm_l_pd, lsm_l_pr, lsm_l_prd, lsm_l_shdi, lsm_l_shei, 
+  lsm_l_sidi, lsm_l_siei, lsm_l_ta, lsm_l_te, lsm_c_ca
+  )
+
+# lsm_l_enn_cv, lsm_l_enn_mn, lsm_l_enn_sd,
+```
+
+Calculate metrics for each landscape.
+
+```{r}
+# apply calculate_landscape_metrics() to each raster
+poll_landscapemetrics_df <- parallel::mclapply(
+  poll_landuse_raster_list,
+  \(x) calculate_landscape_metrics(x, landscapemetrics_function_list),
+  mc.cores = 79
+  ) %>%
+  # bind list entries into a dataframe
+  bind_rows()
+
+write.csv(poll_landscapemetrics_df, "results/landscape_metrics/raw_landscape_metrics.csv")
+```
+
+```{r}
+poll_landscapemetrics_df %>% datatable()
+```
+
+# Landuse Class Composition Analysis
+
+## Transform Data
+
+Calculate the proportion of area occupied by each landscape type in each sampling location.
+
+Because some landscapes include a lot of area covered by water, especially those close to the coast, it is necessary to calculate the proportions subtracting the area covered by water from the total area.
+
+```{r calculate_landscape_metrics}
+# calculate the area occupied by each class in each sampling location
+poll_landuse_class_area <- poll_landscapemetrics_df %>%
+  filter(
+    metric %in% c("ca", "ta")
+    ) %>%
+  left_join(
+    final_poll_metadata
+    ) %>%
+  left_join(
+    land_use_classes, by = join_by(class == id)
+    ) %>%
+  mutate(
+    metric = case_when(
+      metric == "ca" ~ paste0(metric, "_", landuse),
+      .default = metric
+      )
+    ) %>%
+  # sum polls belonging to each sampling location
+  summarise(
+    total_area = sum(value),
+    .by = c(location, metric) # important
+    ) %>%
+  pivot_wider(
+    names_from = metric,
+    values_from = total_area,
+    values_fill = 0
+    ) %>%
+  # join location metadata
+  left_join(
+    final_poll_metadata %>%
+      select(location, landscape_level_1, landscape_level_2) %>%
+      distinct(),
+    "location"
+    ) 
+
+# transform class areas into class proportions in relation to total landscape area
+poll_landuse_class_prop <- poll_landuse_class_area %>%
+  mutate(
+    across(
+      starts_with("ca_"),
+      \(x) x/ta
+      )
+    ) 
+
+# transform class areas into class proportions in relation to total landscape 
+# area that is not water
+poll_landuse_class_prop_nw <- poll_landuse_class_area %>%
+  mutate(
+    ta_minus_water = ta - ca_Water,
+    across(
+      starts_with("ca_"),
+      \(x) x/ta_minus_water
+      )
+    ) %>%
+  select(-ta, -ca_Water)
+
+# write files
+write_csv(poll_landuse_class_area, "results/landscape_metrics/poll_landuse_class_area.csv")
+write_csv(poll_landuse_class_prop, "results/landscape_metrics/poll_landuse_class_propotion.csv")
+write_csv(poll_landuse_class_prop_nw, "results/landscape_metrics/poll_landuse_class_propotion_no_water.csv")
+```
+
+```{r}
+#| echo: false
+datatable(poll_landuse_class_prop_nw)
+```
+
+## Plot prop of each class
+
+Plot proportion of each class (excluding Clouds, Snow and Flooded Vegetation) for the two types of landscape, small-scale farming and low agricultural.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+poll_landuse_class_prop_nw %>%
+  pivot_longer(
+    starts_with("ca_"),
+    names_to = "class",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    class = str_remove(class, "ca_")
+  ) %>%
+  # filter(
+  #   proportion > 0#,
+  #   # !class %in% c("Clouds", "Snow/Ice", "Flooded vegetation")
+  # ) %>%
+  ggplot(
+    aes(x = class,
+        y = proportion,
+        fill = class)
+  ) +
+  geom_boxplot() +
+  geom_point() +
+  facet_wrap(~landscape_level_1) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 75, hjust = 1))
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+p1<- poll_landuse_class_prop_nw %>%
+  pivot_longer(
+    starts_with("ca_"),
+    names_to = "class",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    class = str_remove(class, "ca_")
+  ) %>%
+  # filter(
+  #   proportion > 0#,
+  #   # !class %in% c("Clouds", "Snow/Ice", "Flooded vegetation")
+  # ) %>%
+  ggplot(
+    aes(x = location,
+        y = proportion,
+        fill = class)
+  ) +
+  geom_bar(stat = "identity",position = position_stack()) +
+  facet_wrap(~landscape_level_1, nrow = 1, scales = "free_x") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 75, hjust = 1))
+
+ggsave(
+  filename = "Landuse_landscape_level_1.svg",
+  plot = p1,
+  device = svglite::svglite,
+  width = 10,
+  height = 6
+)
+
+p2<- poll_landuse_class_prop_nw %>%
+  pivot_longer(
+    starts_with("ca_"),
+    names_to = "class",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    class = str_remove(class, "ca_")
+  ) %>%
+  # filter(
+  #   proportion > 0#,
+  #   # !class %in% c("Clouds", "Snow/Ice", "Flooded vegetation")
+  # ) %>%
+  ggplot(
+    aes(x = location,
+        y = proportion,
+        fill = class)
+  ) +
+  geom_bar(stat = "identity",position = position_stack()) +
+  facet_wrap(~landscape_level_2, nrow = 1, scales = "free_x") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 75, hjust = 1))
+
+ggsave(
+  filename = "Landuse_landscape_level_2.svg",
+  plot = p2,
+  device = svglite::svglite,
+  width = 10,
+  height = 6
+)
+```
+
+### Publication Plot
+
+Composition.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+
+color_pal <- c(
+  "Water" = "#6caee9",
+  "Trees" = "#90de7b",
+  "Flooded Vegetation" = "#86d19d",
+  "Crops" = "#ffdb5a",
+  "Built Area" = "#fd274b",
+  "Bare ground" = "#dad7d2",
+  "Snow/Ice" = "#c3e8ff",
+  "Clouds" = "#c5c0b9",
+  "Rangeland" = "#ecc697"
+)
+
+barplot <-
+  poll_landuse_class_prop_nw %>%
+  pivot_longer(
+    starts_with("ca_"),
+    names_to = "Class",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    Class = str_remove(Class, "ca_"),
+    location = str_replace_all(location, "_", " ")
+  ) %>%
+  ggplot(
+    aes(x = location, y = proportion, fill = Class)
+  ) +
+  geom_bar(stat = "identity", position = position_stack()) +
+  facet_grid(~landscape_level_2, scales = "free") +
+  guides(fill = guide_legend(title="Landuse Categories")) +
+  labs( y = "Proportion of area") +
+  scale_fill_manual(values = color_pal) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank(),
+    strip.background = element_blank()
+    )
+
+barplot
+
+ggview::save_ggplot(barplot, width = 8, height = 4, "results/landscape_metrics/barplot_SSF_LoA_class_composition.svg")
+```
+
+## Statistical Tests
+
+Transform data into long format.
+
+```{r}
+poll_landuse_class_prop_long <- 
+  poll_landuse_class_prop_nw %>%
+  select(
+    Location = location,
+    landscape_level_1,
+    landscape_level_2,
+    starts_with("ca")
+    ) %>% 
+  pivot_longer(starts_with("ca_"), names_to = "Class", values_to = "Proportion") %>% 
+  mutate(Class = str_remove(Class, "ca_"))
+```
+
+Compare SSF and LoA.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+p3<- poll_landuse_class_prop_long %>% 
+  ggstatsplot::grouped_ggbetweenstats(
+    x = landscape_level_1,
+    y = Proportion,
+    grouping.var = Class, 
+    type = "nonparametric",
+    pairwise.display = "significant", ## display only significant pairwise comparisons
+    p.adjust.method = "fdr", ## adjust p-values for multiple tests using this method
+    centrality.plotting = FALSE,
+    ggtheme = theme_bw(),
+    ggplot.component = list(
+      theme(
+        plot.title = element_text(size = 8, face = "bold"),
+        plot.subtitle = element_text(size = 8, face = "bold"),
+        axis.title.y.right = element_text(size = 8, face = "bold"), 
+        axis.title.x.bottom = element_blank(),
+        aspect.ratio = .5
+        )
+      ),
+    package = "ggsci",
+    palette = "default_jco",
+    ggsignif.args = list(textsize = 2.5, tip_length = 0.01, na.rm = TRUE),
+    plotgrid.args = list(ncol = 2, widths = 1)
+    )
+
+ggsave(
+  filename = "Statistical_comparison_SSF_LoA.svg",
+  plot = p3,
+  device = svglite::svglite,
+  width = 10,
+  height = 10
+)
+```
+
+Compare SSF and LoA Near/Far.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+p4<- poll_landuse_class_prop_long %>% 
+  ggstatsplot::grouped_ggbetweenstats(
+    x = landscape_level_2,
+    y = Proportion,
+    grouping.var = Class, 
+    type = "nonparametric",
+    pairwise.display = "significant", ## display only significant pairwise comparisons
+    p.adjust.method = "fdr", ## adjust p-values for multiple tests using this method
+    centrality.plotting = FALSE,
+    ggtheme = theme_bw(),
+    ggplot.component = list(
+      theme(
+        plot.title = element_text(size = 8, face = "bold"),
+        plot.subtitle = element_text(size = 8, face = "bold"),
+        axis.title.y.right = element_text(size = 8, face = "bold"), 
+        axis.title.x.bottom = element_blank(),
+        aspect.ratio = .5
+        )
+      ),
+    ggsignif.args = list(textsize = 2, tip_length = 0.01, na.rm = TRUE),
+    plotgrid.args = list(ncol = 2, widths = 1)
+    )
+
+ggsave(
+  filename = "Statistical_comparison_SSF_Near_LoA_Near_Far.svg",
+  plot = p4,
+  device = svglite::svglite,
+  width = 10,
+  height = 10
+)
+```
+
+<!-- Test both types of landscapes for normality in terms of class proportions. -->
+
+<!-- ```{r} -->
+<!-- poll_landuse_class_prop_list <- lapply( -->
+<!--   c("SSF", "LoA"), -->
+<!--   \(x) poll_landuse_class_prop_reduced %>% -->
+<!--     filter(landscape_level_2 == x) %>% -->
+<!--     select(-landscape_level_2) %>% -->
+<!--     as.list() -->
+<!--   ) -->
+
+
+
+<!-- ssf_shapiro <- apply( -->
+<!--   poll_landuse_class_prop_reduced %>% filter(landscape_level_2 == "SSF") %>% select(-landscape_level_2), -->
+<!--   2, -->
+<!--   shapiro.test -->
+<!--   ) -->
+
+<!-- loa_shapiro <- apply( -->
+<!--   poll_landuse_class_prop_reduced %>% filter(landscape_level_2 == "LoA_Near") %>% select(-landscape_level_2), -->
+<!--   2, -->
+<!--   shapiro.test -->
+<!--   ) -->
+<!-- ``` -->
+
+<!-- All tests above are significant (p-value < 0.05), which means data is not normal. -->
+
+<!-- Run Wilcoxon Rank Sum to test if the proportion of each landuse class is significantly different between SSF and LoA environments.  -->
+
+<!-- ```{r} -->
+<!-- create a list with class proportion vectors for each environment -->
+<!-- poll_landuse_class_prop_list <- lapply( -->
+<!--   c("SSF", "LoA"), -->
+<!--   \(x) poll_landuse_class_prop_reduced %>% -->
+<!--     filter(landscape_level_1 == x) %>% -->
+<!--     select(-landscape_level_1, -landscape_level_2) %>% -->
+<!--     as.list() -->
+<!--   ) -->
+
+<!-- names(poll_landuse_class_prop_list) <- c("SSF", "LoA") -->
+
+<!-- # run a wilcoxon test between environments for each of the landscape classes -->
+<!-- wilcox_test_results <- lapply( -->
+<!--   colnames(poll_landuse_class_prop_reduced) %>% str_subset("ca_"), -->
+<!--   \(x) wilcox.test( -->
+<!--     poll_landuse_class_prop_list[["SSF"]][[x]], -->
+<!--     poll_landuse_class_prop_list[["LoA"]][[x]] -->
+<!--     ) -->
+<!--   ) -->
+
+<!-- names(wilcox_test_results) <- colnames(poll_landuse_class_prop_reduced) %>% -->
+<!--   str_subset("ca_") -->
+
+<!-- # run a wilcoxon test between environments for each of the landscape classes -->
+<!-- # wilcox_coin_test_results <- lapply( -->
+<!-- #   colnames(poll_landuse_class_prop_reduced) %>% str_subset("ca_"), -->
+<!-- #   \(x) coin::wilcox_test( -->
+<!-- #     poll_landuse_class_list[["SSF"]][[x]] ~ poll_landuse_class_list[["LoA"]][[x]], -->
+<!-- #     ties.method = "mid-rank" -->
+<!-- #     ) -->
+<!-- #   ) -->
+
+<!-- # names(wilcox_test_results) <- colnames(poll_landuse_class_prop_reduced) %>% -->
+<!-- #   str_subset("ca_") -->
+
+<!-- # display results -->
+<!-- lapply( -->
+<!--   wilcox_test_results, -->
+<!--   broom::tidy -->
+<!--   ) %>% -->
+<!--   bind_rows(.id = "class") -->
+
+<!-- ``` -->
+
+<!-- All land use classes show a significant difference between the two landscapes. -->
+
+## Correlation Between Land Use Classes
+
+```{r}
+# calculate Pearson correlation
+poll_landuse_class_correlation <- cor(
+  poll_landuse_class_prop_nw %>%
+    select(-ta_minus_water, -landscape_level_1, -landscape_level_2) %>%
+    column_to_rownames("location")
+  )
+```
+
+Plot correlation matrix.
+
+```{r}
+svglite::svglite("poll_landuse_correlation.svg", width = 8, height = 8)
+
+corrplot(
+  poll_landuse_class_correlation,
+  method = "number",
+  order = "hclust",
+  addrect = 2
+)
+
+dev.off()
+```
+
+**This shows that:**
+
+- Proportion of Rangeland is negatively correlated to the proportion of Crops, Trees, and Built Area;
+- Proportion of Trees is negatively correlated to the proportion of Crops.
+
+## Principal Components Analysis
+
+Run PCA.
+
+```{r}
+poll_landuse_class_pca <- PCA(
+  poll_landuse_class_prop_nw %>%
+    select(-ta_minus_water) %>%
+    column_to_rownames("location"),
+  scale.unit = TRUE,
+  quali.sup = 6:7,
+  graph = FALSE
+  )
+```
+
+Check variance.
+
+```{r}
+poll_landuse_class_pca$eig %>% datatable()
+
+fviz_screeplot(poll_landuse_class_pca, ncp=10)
+```
+
+**The first 3 dimensions together explain almost 90% of variation**.
+
+Check variable contribution to each of the three dimentions.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+
+poll_landuse_class_pca$var$cos2 %>% datatable()
+poll_landuse_class_pca$var$cos2 %>% heatmap()
+
+fviz_pca_var(axes = c(1,2),
+  poll_landuse_class_pca,
+  col.var = "cos2",
+  gradient.cols = c("black", "orange", "green"),
+  repel = TRUE
+  )
+
+fviz_pca_var(axes = c(1,3),
+  poll_landuse_class_pca,
+  col.var = "cos2",
+  gradient.cols = c("black", "orange", "green"),
+  repel = TRUE
+  )
+
+fviz_pca_var(axes = c(2,3),
+  poll_landuse_class_pca,
+  col.var = "cos2",
+  gradient.cols = c("black", "orange", "green"),
+  repel = TRUE
+  )
+```
+
+Dim1:
+- Most influenced by **proportion of crops, rangeland and built area**; 
+
+Dim2:
+- Most influenced by **proportion of trees and rangeland**;
+
+Dim3: 
+- Most influenced by **proportion of bare ground**;
+
+Check samples.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+
+fviz_pca_biplot(
+  axes = c(1,2),
+  poll_landuse_class_pca,
+  label = "all",
+  col.var = "black",
+  habillage = 6
+  )
+
+fviz_pca_biplot(
+  axes = c(1,2),
+  poll_landuse_class_pca,
+  label = "all",
+  col.var = "black",
+  habillage = 7
+  )
+
+ggsave(filename = "results/landscape_metrics/PCA_SSF_LoA_class_composition.pdf", width = 10, height = 8)
+```
+
+Dim1 separates SSF (more built area and crops) from LoA (more rangeland).
+Dim2 separates landscapes based on proportion of rangeland and trees.
+Dim3 separates landscapes based on proportion of bare ground.
+
+### Publication Plot
+
+PCA.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+
+variance <- poll_landuse_class_pca$eig[,2]
+
+ind_coords <-
+  get_pca_ind(poll_landuse_class_pca)$coord %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Location") %>% 
+  left_join(
+    final_poll_metadata %>%
+      select(Location = location, landscape_level_1, landscape_level_2) %>%
+      distinct()
+    ) %>% 
+  mutate(Location = str_replace_all(Location, "_", " "))
+
+var_coords <-
+  get_pca_var(poll_landuse_class_pca)$coord %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Variable") %>% 
+  mutate(Variable = str_remove(Variable, "ca_"))
+
+pca_plot <-
+  ggplot() +
+  geom_hline(aes(yintercept = 0), color = "lightgrey") +
+  geom_vline(aes(xintercept = 0), color = "lightgrey") +
+  geom_point(
+    data = ind_coords, 
+    aes(x = Dim.1, y = Dim.2, fill = landscape_level_2),
+    shape = 21, color = "black", size = 2
+    ) +
+  geom_segment(
+    data = var_coords,
+    aes(x = 0, y = 0, xend = (`Dim.1`*2), yend = (`Dim.2`*2)),
+    arrow = arrow(length = unit(1/2, "picas")),
+    color = "black"
+    ) +
+  geom_text_repel(
+    data = ind_coords,
+    aes(x = (`Dim.1`), y = (`Dim.2`), label = Location),
+    size = 4
+    ) +
+  geom_label_repel(
+    data = var_coords,
+    aes(x = (`Dim.1`*2), y = (`Dim.2`*2), label = Variable),
+    size = 4, force = 3
+    ) +
+  guides(fill = guide_legend(title="Landscape Category", )) +
+  labs(
+    x = paste0("PC1 (", round(variance[1],1), "%)"),
+    y = paste0("PC2 (", round(variance[2],1), "%)")
+    ) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "inside",
+    legend.position.inside = c(.99,.99),
+    legend.justification = c(1, 1),
+    legend.background = element_rect(fill = "white", color = "black", linewidth = .2)
+    )
+
+pca_plot
+
+ggview::save_ggplot(pca_plot, width = 8, height = 8, "results/landscape_metrics/PCA_SSF_LoA_class_composition.svg")
+```
+
+# Landscape Metrics Analysis
+
+## Transform Data 
+
+Poll026 (Arruda) and poll052 (São Mamede) have less than 3 landuse classes and several metrics cannot be calculated, returning NAs. Because of this, NAs are ignored when calculating the median values for each sampling location.
+
+```{r}
+# calculate the median and mean of each metric in each location
+poll_landuse_metrics_summary <- poll_landscapemetrics_df %>%
+  filter(
+    !metric %in% c("ca", "ta")
+    ) %>%
+  left_join(
+    final_poll_metadata
+    ) %>%
+  left_join(
+    land_use_classes, by = join_by(class == id)
+    ) %>%
+  # calculate median, mean, and standard deviation
+  summarise(
+    median = median(value, na.rm = TRUE),
+    mean = mean(value, na.rm= TRUE),
+    sd = sd(value, na.rm = TRUE),
+    .by = c(location, metric)
+    )
+
+poll_landuse_metrics_median <- poll_landuse_metrics_summary %>%
+  select(location, metric, median) %>%
+  pivot_wider(
+    names_from = metric,
+    values_from = median,
+    values_fill = 0
+    ) %>%
+  # join location metadata
+  left_join(
+    final_poll_metadata %>%
+      select(location, landscape_level_1, landscape_level_2) %>%
+      distinct(),
+    "location"
+    ) 
+
+write_csv(poll_landuse_metrics_summary, "results/landscape_metrics/poll_landuse_metrics_mean_median_sd.csv")
+write.csv(poll_landuse_metrics_median, "results/landscape_metrics/poll_landuse_metrics_median.csv")
+```
+
+```{r}
+datatable(poll_landuse_metrics_median) 
+```
+
+
+## Plot prop of each class
+
+Plot proportion of each class (excluding Clouds, Snow and Flooded Vegetation) for the two types of landscape, small-scale farming and low agricultural.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+poll_landuse_metrics_summary  %>%
+  left_join(
+    final_poll_metadata
+    ) %>%
+  ggplot(
+    aes(
+      x = landscape_level_1,
+      y = median,
+      #fill = metric
+      )
+  ) +
+  geom_boxplot() +
+  geom_point(position = position_jitter(), size= 1) +
+  facet_wrap(
+    ~metric, scales = "free_y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 75, hjust = 1))
+```
+
+## Correlation Between LandscapeMetrics
+
+```{r}
+# calculate Pearson correlation
+poll_landuse_metrics_correlation <- cor(
+  poll_landuse_metrics_median %>%
+    select(-landscape_level_1, -landscape_level_2) %>%
+    column_to_rownames("location") %>%
+    scale(), 
+  method = "pearson"
+  )
+```
+
+Plot correlation matrix.
+
+```{r}
+#| fig-width: 12
+#| fig-height: 8
+corrplot(
+  poll_landuse_metrics_correlation,
+  method = "number",
+  order = "hclust",
+  addrect = 5
+  )
+```
+
+```{r}
+library(corrplot)
+
+# Correlation matrix (as you already have)
+poll_landuse_metrics_correlation <- cor(
+  poll_landuse_metrics_median %>%
+    dplyr::select(-landscape_level_1, -landscape_level_2) %>%
+    tibble::column_to_rownames("location") %>%
+    scale(),
+  method = "pearson"
+)
+
+# A diverging palette centred at 0 (easy to interpret)
+col_pal <- colorRampPalette(c("#B2182B", "white", "#2166AC"))(200)
+
+svglite("landscapemetrics_correlation.svg",
+         width = 12, height = 8)
+
+corrplot(
+  poll_landuse_metrics_correlation,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  addrect = 3,
+  tl.col = "black",
+  tl.srt = 45,
+  diag = FALSE,
+  col = colorRampPalette(c("#B2182B", "white", "#2166AC"))(200),
+  addCoef.col = "black",
+  number.cex = 0.7,
+  cl.cex = 0.9,
+  mar = c(0,0,1,0)
+)
+
+dev.off()
+```
+
+
+There appear to be 4 groups of highly correlated variables:
+
+Group 1:
+
+- Mean and Standard Deviation of of Patch Area (*area_mn* and *area_sd*), Mean Contiguity (*mean_contig*), Patch Cohesion (*cohesion*), Contagion (*contag*), and Largest Patch Index (*lpi*) are all strongly positively correlated. This group is strongly negatively correlated to groups 3 and 5.
+
+Group 2: 
+
+- Standard Deviation and Coefficient of Variation (*contig_cv* and *contig_sv*) are strongly positively correlated to each other, and strongly negatively correlated to the mean Contiguity.
+
+Group 3:
+
+- Diversity indexes, entropy (*ent* and *joinent*), and interspertion and juxtaposition index (*iji*) all relate to **landscape class diversity**, and are all strongly positively correlated. 
+**Kept Shannon Diversity Index (SHDI)**.
+
+**LANDSCAPE FRAGMENTATION AND CONFIGURATION**
+
+Edge Density (*ed*), Total Edge (*te*), Number of Patches (*np*), Patch Density (*pd*), and Conditional Entropy (*condent*) are all strongly positively correlated. They tend to increase with fragmentation.
+
+Mean and Standard Deviation of patch area is strongly and negatively correlated to the above metrics. They tend to decrease with fragmentation.
+
+Kept Number of Patches (*np*).
+
+## Principal Components Analysis
+
+Run PCA.
+
+```{r}
+poll_landuse_metrics_pca <- PCA(
+ poll_landuse_metrics_median %>%
+    column_to_rownames("location"),
+  scale.unit = TRUE,
+  quali.sup = 24:25,
+  graph = FALSE
+  )
+```
+
+Check variance.
+
+```{r}
+poll_landuse_metrics_pca$eig %>% datatable()
+
+fviz_screeplot(poll_landuse_metrics_pca, ncp=10)
+```
+
+**The first 4 dimensions together explain almost 90% of variation**.
+
+Check variable contribution to each of the three dimensions.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+
+poll_landuse_metrics_pca$var$cos2 %>% datatable()
+poll_landuse_metrics_pca$var$cos2 %>% heatmap()
+
+fviz_pca_var(axes = c(1,2),
+  poll_landuse_metrics_pca,
+  col.var = "cos2",
+  gradient.cols = c("black", "orange", "green"),
+  repel = TRUE
+  )
+
+fviz_pca_var(axes = c(1,3),
+  poll_landuse_metrics_pca,
+  col.var = "cos2",
+  gradient.cols = c("black", "orange", "green"),
+  repel = TRUE
+  )
+
+fviz_pca_var(axes = c(2,3),
+  poll_landuse_metrics_pca,
+  col.var = "cos2",
+  gradient.cols = c("black", "orange", "green"),
+  repel = TRUE
+  )
+```
+
+Dim1:
+- Most influenced by **cohesion, area_sd, lpi, contag, area_mn**, metrics which are highly correlated and whose values tend to decrease with landscape fragmentation;
+- Most influenced by **joinent, pd, np, sidi, shdi, ent**, metrics whose values tend to increase with fragmentation.
+- Related to landscape fragmentation; 
+
+Dim2:
+- Most influenced by **area_cv, te, ed, condent**, metrics which are highly correlated and whose values tend to increase with landscape fragmentation and complexity;
+- Most influenced by **ent, shdi, prd, pr, sidi, siei**, metrics which are higly correlated and whose values tend to increase with landscape fragmentation and complexity.
+
+Dim3: 
+- Most influenced by **contig_mn, contig_cv and contig_sd**;
+
+Check samples.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+
+fviz_pca_biplot(
+  axes = c(1,2),
+  poll_landuse_metrics_pca,
+  label = "all",
+  col.var = "black",
+  habillage = 24
+  )
+
+fviz_pca_biplot(
+  axes = c(1,2),
+  poll_landuse_metrics_pca,
+  label = "all",
+  col.var = "black",
+  habillage = 25
+  )
+```
+
+# Biplot locations + landscape metrics
+```{r}
+
+install.packages("patchwork")  # once
+library(patchwork)
+library(factoextra)
+library(ggplot2)
+
+clean_theme <- theme_void() +
+  theme(
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    axis.title = element_text(colour = "black"),
+    legend.background = element_blank(),
+    plot.background = element_blank()
+  )
+
+p_ind <- fviz_pca_ind(
+  poll_landuse_metrics_pca,
+  axes = c(1,2),
+  habillage = 24,
+  addEllipses = TRUE,
+  ellipse.level = 0.95,
+  repel = TRUE,
+  pointsize = 3
+) +
+  labs(title = "Individuals – PCA") +
+  clean_theme
+
+p_var12 <- fviz_pca_var(
+  poll_landuse_metrics_pca,
+  axes = c(1,2),
+  col.var = "contrib",
+  repel = TRUE,
+  select.var = list(contrib = 12)
+) +
+  labs(title = "Variables: PC1 vs PC2") +
+  clean_theme +
+  theme(
+    legend.position = c(0.85, 0.25),
+    legend.key.height = unit(0.4, "cm")
+  )
+
+p_var13 <- fviz_pca_var(
+  poll_landuse_metrics_pca,
+  axes = c(1,3),
+  col.var = "contrib",
+  repel = TRUE,
+  select.var = list(contrib = 12)
+) +
+  labs(title = "Variables: PC1 vs PC3") +
+  clean_theme +
+  theme(
+    legend.position = c(0.85, 0.25),
+    legend.key.height = unit(0.4, "cm")
+  )
+
+p_var23 <- fviz_pca_var(
+  poll_landuse_metrics_pca,
+  axes = c(2,3),
+  col.var = "contrib",
+  repel = TRUE,
+  select.var = list(contrib = 12)
+) +
+  labs(title = "Variables: PC2 vs PC3") +
+  clean_theme +
+  theme(
+    legend.position = c(0.85, 0.25),
+    legend.key.height = unit(0.4, "cm")
+  )
+
+panel <- p_ind / (p_var12 | p_var13 | p_var23) +
+  plot_layout(heights = c(2, 1))
+
+panel
+
+
+```
+
+# teste Biplot locations + landscape metrics
+```{r}
+# ---------- Packages ----------
+# install.packages(c("patchwork","cowplot","scales","svglite"))  # run once if needed
+library(patchwork)
+library(factoextra)
+library(ggplot2)
+library(grid)     # unit()
+library(cowplot)  # get_legend()
+library(scales)   # pretty_breaks(), number_format()
+library(svglite)
+
+# ---------- Themes ----------
+clean_theme <- theme_void() +
+  theme(
+    axis.line = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    axis.title = element_text(colour = "black"),
+    plot.background = element_blank(),
+    legend.background = element_blank()
+  )
+
+small_panel_theme <- theme(
+  plot.title = element_blank(),         # remove titles in bottom panels
+  axis.title = element_text(size = 10),
+  axis.text  = element_blank(),         # remove tick labels
+  axis.ticks = element_blank(),         # remove ticks
+  plot.margin = margin(5, 5, 5, 5)
+)
+
+# ---------- TOP: Individuals ----------
+# One merged legend: SSF (orange triangle) and LoA (green circle)
+p_ind <- fviz_pca_ind(
+  poll_landuse_metrics_pca,
+  axes = c(1, 2),
+  habillage = 24,
+  addEllipses = TRUE,
+  ellipse.level = 0.95,
+  repel = TRUE,
+  pointsize = 3
+) +
+  clean_theme +
+  labs(title = NULL, colour = NULL, shape = NULL, fill = NULL) +  # remove titles
+
+  # Force *both* colour and shape scales to use the SAME breaks/labels
+  scale_color_manual(
+    name = NULL,
+    breaks = c("landscape_level_1_SSF", "landscape_level_1_LoA"),
+    labels = c("SSF", "LoA"),
+    values = c(
+      "landscape_level_1_SSF" = "orange",
+      "landscape_level_1_LoA" = "green3"
+    )
+  ) +
+  scale_shape_manual(
+    name = NULL,
+    breaks = c("landscape_level_1_SSF", "landscape_level_1_LoA"),
+    labels = c("SSF", "LoA"),
+    values = c(
+      "landscape_level_1_SSF" = 17,  # triangle
+      "landscape_level_1_LoA" = 16   # circle
+    )
+  ) +
+
+  # Keep ellipse colours consistent but don't create a second legend from fill
+  scale_fill_manual(
+    values = c(
+      "landscape_level_1_SSF" = "orange",
+      "landscape_level_1_LoA" = "green3"
+    )
+  ) +
+  guides(fill = "none") +  # remove ellipse-fill legend
+
+  # Remove the square key boxes behind symbols
+  theme(
+    legend.key = element_blank(),
+    legend.background = element_blank(),
+    legend.key.size = unit(0.6, "cm")
+  )
+
+
+# ---------- Variables panel ----------
+top_vars <- 8
+
+# Extract percentage of variance explained
+var_explained <- poll_landuse_metrics_pca$eig[, 2]
+
+pc_lab <- function(pc) {
+  paste0("PC", pc, " (", round(var_explained[pc], 1), "%)")
+}
+
+p_var12 <- fviz_pca_var(
+  poll_landuse_metrics_pca,
+  axes = c(1, 2),
+  col.var = "contrib",
+  repel = TRUE,
+  labelsize = 3,
+  select.var = list(contrib = top_vars)
+) +
+  scale_color_gradient(low = "#deebf7", high = "#08306b") +
+  labs(x = pc_lab(1), y = pc_lab(2)) +
+  clean_theme + small_panel_theme +
+  theme(legend.position = "none")
+
+p_var13 <- fviz_pca_var(
+  poll_landuse_metrics_pca,
+  axes = c(1, 3),
+  col.var = "contrib",
+  repel = TRUE,
+  labelsize = 3,
+  select.var = list(contrib = top_vars)
+) +
+  scale_color_gradient(low = "#deebf7", high = "#08306b") +
+  labs(x = pc_lab(1), y = pc_lab(3)) +
+  clean_theme + small_panel_theme +
+  theme(legend.position = "none")
+
+p_var14 <- fviz_pca_var(
+  poll_landuse_metrics_pca,
+  axes = c(1, 4),
+  col.var = "contrib",
+  repel = TRUE,
+  labelsize = 3,
+  select.var = list(contrib = top_vars)
+) +
+  scale_color_gradient(low = "#deebf7", high = "#08306b") +
+  labs(x = pc_lab(1), y = pc_lab(4)) +
+  clean_theme + small_panel_theme +
+  theme(legend.position = "none")
+
+# ---------- Legend-only plot ----------
+p_leg <- fviz_pca_var(
+  poll_landuse_metrics_pca,
+  axes = c(1, 2),
+  col.var = "contrib",
+  repel = FALSE
+) +
+  clean_theme +
+  scale_color_gradient(
+    low = "#deebf7",
+    high = "#08306b",
+    breaks = scales::pretty_breaks(n = 8),
+    labels = scales::number_format(accuracy = 0.01)
+  ) +
+  guides(
+    colour = guide_colourbar(
+      title = "Contribution (%)",
+      nbin = 150,
+      ticks = TRUE,
+      barheight = unit(3.8, "cm"),
+      barwidth = unit(0.45, "cm")
+    )
+  ) +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    legend.key = element_blank(),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+leg_only <- wrap_elements(full = cowplot::get_legend(p_leg))
+
+# ---------- Combine final panel ----------
+panel <- (p_var12 | p_var13 | p_var14 | leg_only) +
+  plot_layout(widths = c(1, 1, 1, 0.25))
+
+panel
+
+# ---------- Save ----------
+ggsave(
+  "Figure S6.svg",
+  panel,
+  width = 14,
+  height = 5,
+  device = svglite::svglite,
+  bg = "white"
+)
+
+ggsave(
+  "Figure S6.pdf",
+  panel,
+  width = 14,
+  height = 5,
+  bg = "white"
+)
+```
+
+
+# Covariate File Creation
+
+## Principal Components
+
+```{r}
+covariates_landuse_metrics_pca <- 
+  poll_landuse_metrics_pca$ind$coord %>% 
+  as.data.frame() %>% 
+  rownames_to_column("SampLoc") %>% 
+  filter(SampLoc != "Assafora") %>% # RETIRAR ASSAFORA
+  arrange(SampLoc) %>% 
+  column_to_rownames("SampLoc") %>% 
+  select(Dim.1, Dim.2, Dim.3, Dim.4) %>% 
+  t()
+
+write.csv(
+  covariates_landuse_metrics_pca,
+  "results/covariate_files/landuse_metrics_pca_covariates.csv",
+  row.names = T
+  )
+
+write.table(
+  covariates_landuse_metrics_pca,
+  "results/covariate_files/landuse_metrics_pca_covariate_file.txt",
+  row.names = F, col.names = F, sep = " " 
+  )
+```
+
+# Extracting PCs
+
+```{r}
+library(gt)
+
+PCA_coords_landscape_metrics <-
+  poll_landuse_metrics_pca$ind$coord %>%
+  as.data.frame() %>%
+  rownames_to_column("location") %>%
+  select(-`Dim.5`) %>%
+  pivot_longer(starts_with("Dim")) %>%
+  mutate(cat = "Landscape Metrics", name2 = paste0(name, "_", cat))
+
+PCA_coords_landuse <-
+  poll_landuse_class_pca$ind$coord %>%
+  as.data.frame() %>%
+  rownames_to_column("location") %>%
+  select(c(location, `Dim.1`, `Dim.2`)) %>%
+  pivot_longer(starts_with("Dim")) %>%
+  mutate(cat = "Land-use Composition", name2 = paste0(name, "_", cat))
+
+# bind_rows(PCA_coords_landscape_metrics, PCA_coords_landuse) %>%
+#   left_join(sample_metadata %>% select(location, landscape_level_2) %>% distinct()) %>%
+#   mutate(value_2 = scale(value), .by = name) %>%
+#   pivot_wider(c(location, landscape_level_2),names_from = "name", values_from = value) %>%
+#   gt(rowname_col = "location", groupname_col = "landscape_level_2") %>%
+#   tab_spanner_delim(columns = starts_with("Dim"), delim = "_", reverse = T) %>%
+#   tab_options(row_group.as_column = TRUE) %>%
+#   data_color(direction = "column", method = "numeric")
+
+bind_rows(PCA_coords_landscape_metrics, PCA_coords_landuse) %>%
+  left_join(sample_metadata %>% select(location, landscape_level_2) %>% distinct()) %>%
+  mutate(value_2 = scale(value), .by = name2) %>%
+  ggplot() +
+  geom_raster(aes(x = name, y = location, fill = value_2)) +
+  geom_text(aes(
+    x = name,
+    y = location,
+    label = round(value, 1)
+  ), size = 3) +
+  guides(fill = "none") +
+  facet_grid(
+    cols = vars(cat),
+    rows = vars(landscape_level_2),
+    scales = "free"
+  ) +
+  colorspace::scale_fill_continuous_diverging(mid = 0) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(), strip.text = element_text(face = "bold"))
+
+
+## TESTE ##
+
+plot_data <- bind_rows(PCA_coords_landscape_metrics, PCA_coords_landuse) %>%
+  left_join(sample_metadata %>%
+              select(location, landscape_level_2) %>%
+              distinct(),
+            by = "location") %>%
+  mutate(
+    location = str_replace_all(location, "_", " "),
+    landscape_level_2 = str_replace_all(landscape_level_2, "_", " "),
+    landscape_level_2 = recode(
+      landscape_level_2,
+      "Far LoA" = "Far-LoA",
+      "Near LoA" = "Near-LoA",
+      "SSF" = "SSF"
+    ),
+    name = str_replace(name, "Dim\\.", "PC"),
+    value_2 = scale(value)[, 1],
+    .by = name2
+  )
+
+
+x_breaks <-  c(
+  "Dim.1_Land-use Composition",
+  "Dim.2_Land-use Composition",
+  "Dim.1_Landscape Metrics",
+  "Dim.2_Landscape Metrics",
+  "Dim.3_Landscape Metrics",
+  "Dim.4_Landscape Metrics"
+)
+
+x_labels <-
+  c(
+    "PC1",
+    "PC2",
+    "PC1\nFragmentation & Compositional Complexity",
+    "PC2\nPatch Heterogeneity & Edge Complexity",
+    "PC3\nLandscape Diversity & Configurational Complexity",
+    "PC4\nPatch Density & Connectivity Variation"
+  )
+
+p <- ggplot(plot_data) +
+  geom_tile(
+    aes(x = name2, y = location, fill = value_2),
+    colour = "white",
+    linewidth = 0.35,
+    width = 1,
+    height = 1
+  ) +
+  geom_text(aes(
+    x = name2,
+    y = location,
+    label = round(value, 1)
+  ), size = 4.2) +
+  facet_grid(
+    rows = vars(landscape_level_2),
+    cols = vars(cat),
+    scales = "free",
+    space = "free",
+    switch = "y"
+  ) +
+  colorspace::scale_fill_continuous_diverging(mid = 0) +
+  scale_x_discrete(expand = expansion(mult = 0), breaks = x_breaks, labels = str_wrap(x_labels, 6)) +
+  scale_y_discrete(expand = expansion(mult = 0)) +
+  guides(fill = "none") +
+  labs(x = NULL, y = "Location") +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid = element_blank(),
+    
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.8
+    ),
+    
+    strip.placement = "inside",
+    strip.background.y = element_rect(
+      colour = "black",
+      fill = "white",
+      linewidth = 0.8,
+    ),
+    
+    strip.text.y.left = element_text(face = "bold", size = 11, angle = 90),
+    
+    strip.text.x = element_text(face = "bold", size = 12),
+    
+    axis.text.x = element_text(size = 10, colour = "black"),
+    axis.text.y = element_text(size = 10, colour = "black"),
+    axis.title.y = element_text(size = 12),
+    
+    axis.ticks = element_blank(),
+    
+    panel.spacing.x = unit(0.15, "lines"),
+    panel.spacing.y = unit(0.25, "lines"),
+    
+    plot.margin = margin(4, 4, 4, 4)
+  )
+
+p
+
+ggview::save_ggplot(p, "teste.pdf", width = 10, height = 8)
+```
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
