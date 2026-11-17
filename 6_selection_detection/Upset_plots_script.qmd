@@ -1,0 +1,967 @@
+---
+title: "UpSet Plot of Outlier Overlap Across Methods"
+subtitle: "Comparison of candidate outliers detected by BayPass C2, BayPass BF, BayeScan, PCAdapt and Local Scores"
+author: "André F. Henriques"
+date: today
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    toc-float: true
+    number-sections: true
+    number-depth: 4
+    code-fold: false
+    code-tools: true
+    code-overflow: wrap
+    self-contained: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+editor: source
+---
+
+# 1. Introduction
+
+This report summarizes the overlap among candidate outliers detected using five different outlier-detection approaches:
+
+1. BayPass C2
+2. BayPass BF
+3. BayeScan
+4. PCAdapt with Benjamini-Hochberg correction
+5. BayPass Local Score windows
+
+The overlap is visualized using an UpSet plot generated with the `ggVennDiagram` package.
+
+# 2. Packages
+
+## 2.1. Install packages
+
+```{r}
+
+packages <- c(
+  "tidyverse",
+  "janitor",
+  "ggVennDiagram",
+  "ggplot2",
+  "ComplexUpset"
+)
+
+for (pkg in packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+```
+
+## 2.2. Load packages
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(ggVennDiagram)
+library(ggplot2)
+library(ComplexUpset)
+```
+
+# 3. General settings
+
+These define the species and the directory currently being analysed.
+
+Change to "AND", "BOM", or "LML".
+
+```{r}
+
+species_prefix <- "LML"
+
+species_name <- "Lasioglossum malachurum"
+
+base_dir <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/merged_graphs/UpSet_plots"
+
+output_dir <- file.path(base_dir, species_prefix)
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+output_dir
+
+```
+
+# 4. Input files
+
+```{r}
+
+C2_file <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/baypass/03_results/LML_maf0.05_run/Contrast_analysis/C2/LML_C2_FULL_table_with_outlier_flag_seed7357.csv"
+
+BF_file <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/baypass/03_results/LML_maf0.05_run/Contrast_analysis/BF/LML_BF_FULL_table_with_outlier_flag_seed7357.csv"
+
+bayescan_file <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/bayescan/Lasioglossum_malachurum_results/Lasioglossum_malachurum_pr_100_maf_0.05_fmiss_0.20_GQ_20_no_thinned_tidypopgen_positive_with_CHR_POS.txt"
+
+pcadapt_bonferroni_file <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/pcadapt/Lasioglossum_malachurum_results/PCAdapt_bonferroni_correction_outliers/K1/LML_K1_maf_0.05_bonferroni_outliers_with_CHR_POS.csv"
+
+local_score_base <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection/baypass/03_results/LML_maf0.05_run/Local_scores"
+
+contrast_ids <- c("1", "2", "3")
+
+local_score_files <- tibble(
+  contrast_id = contrast_ids,
+  local_scores = file.path(
+    local_score_base,
+    paste0("Contrast_", contrast_ids),
+    "xi_1",
+    paste0("LML_local_scores_contrast_", contrast_ids, "_seed7357_xi1_res_local_scores.csv")
+  ),
+  significant_windows = file.path(
+    local_score_base,
+    paste0("Contrast_", contrast_ids),
+    "xi_1",
+    paste0("LML_local_scores_contrast_", contrast_ids, "_seed7357_xi1_significant_windows.csv")
+  )
+)
+
+local_score_files
+
+```
+
+# 5. Helper functions
+
+## 5.1. Read tables function
+
+```{r}
+
+read_flexible_table <- function(file) {
+  
+  ext <- tools::file_ext(file)
+  
+  if (ext %in% c("csv")) {
+    
+    readr::read_csv(
+      file,
+      show_col_types = FALSE
+    )
+    
+  } else {
+    
+    readr::read_table(
+      file,
+      show_col_types = FALSE
+    )
+  }
+}
+
+```
+
+## 5.2. Standardize CRH and POS
+
+```{r}
+
+standardise_chr_pos <- function(df) {
+  
+  df <- df %>% clean_names()
+  
+  chr_candidates <- c(
+    "chr", "chrom", "chromosome", "chromosome_id",
+    "scaffold", "contig", "seqid", "chrom_id"
+  )
+  
+  pos_candidates <- c(
+    "pos", "position", "bp", "snp_pos",
+    "base_pair", "basepair", "position_bp"
+  )
+  
+  chr_col <- chr_candidates[chr_candidates %in% names(df)][1]
+  pos_col <- pos_candidates[pos_candidates %in% names(df)][1]
+  
+  if (is.na(chr_col)) {
+    stop(
+      "Could not find a chromosome/scaffold column.\n",
+      "Available columns are:\n",
+      paste(names(df), collapse = ", ")
+    )
+  }
+  
+  if (is.na(pos_col)) {
+    stop(
+      "Could not find a SNP position column.\n",
+      "Available columns are:\n",
+      paste(names(df), collapse = ", ")
+    )
+  }
+  
+  df %>%
+    rename(
+      CHR = all_of(chr_col),
+      POS = all_of(pos_col)
+    ) %>%
+    mutate(
+      CHR = as.character(CHR),
+      POS = as.numeric(POS),
+      SNP_ID = paste(CHR, POS, sep = "_")
+    )
+}
+
+```
+
+## 5.3. Detect outlier column
+
+```{r}
+
+detect_outlier_column <- function(df) {
+  
+  df <- df %>% clean_names()
+  
+  candidates <- c(
+    "outlier",
+    "is_outlier",
+    "outlier_flag",
+    "flag_outlier",
+    "significant",
+    "is_significant",
+    "candidate",
+    "is_candidate",
+    "outlier_c2",
+    "outlier_bf",
+    "c2_outlier",
+    "bf_outlier"
+  )
+  
+  outlier_col <- candidates[candidates %in% names(df)][1]
+  
+  if (is.na(outlier_col)) {
+    stop(
+      "Could not automatically find the outlier flag column.\n",
+      "Available columns are:\n",
+      paste(names(df), collapse = ", "),
+      "\n\nPlease rename your outlier column to one of:\n",
+      paste(candidates, collapse = ", ")
+    )
+  }
+  
+  outlier_col
+}
+
+```
+
+## 5.4. Detect logical expression
+
+```{r}
+
+to_logical_outlier <- function(x) {
+  
+  case_when(
+    x %in% c(TRUE, "TRUE", "True", "true", "yes", "YES", "Yes", 1, "1") ~ TRUE,
+    x %in% c(FALSE, "FALSE", "False", "false", "no", "NO", "No", 0, "0") ~ FALSE,
+    is.na(x) ~ FALSE,
+    TRUE ~ as.logical(x)
+  )
+}
+
+```
+
+## 5.5. Read outlier flag table
+
+```{r}
+
+read_outlier_flag_table <- function(file, method_name) {
+  
+  df_raw <- read_flexible_table(file) %>%
+    clean_names()
+  
+  outlier_col <- detect_outlier_column(df_raw)
+  
+  df_raw %>%
+    standardise_chr_pos() %>%
+    mutate(
+      outlier_flag_tmp = to_logical_outlier(.data[[outlier_col]])
+    ) %>%
+    filter(outlier_flag_tmp == TRUE) %>%
+    distinct(CHR, POS, SNP_ID) %>%
+    mutate(method = method_name)
+}
+
+```
+
+## 5.6. Read merged table
+
+```{r}
+
+read_simple_outlier_table <- function(file, method_name) {
+  
+  read_flexible_table(file) %>%
+    standardise_chr_pos() %>%
+    distinct(CHR, POS, SNP_ID) %>%
+    mutate(method = method_name)
+}
+
+```
+
+## 5.7. Standardize local score windows
+
+```{r}
+
+standardise_windows <- function(df) {
+  
+  df <- df %>% clean_names()
+  
+  chr_candidates <- c(
+    "chr", "chrom", "chromosome", "chromosome_id",
+    "scaffold", "contig", "seqid", "chrom_id"
+  )
+  
+  start_candidates <- c(
+    "start", "begin", "beg", "window_start", "pos_start",
+    "from", "left", "lower", "lower_bound"
+  )
+  
+  end_candidates <- c(
+    "end", "stop", "window_end", "pos_end",
+    "to", "right", "upper", "upper_bound"
+  )
+  
+  chr_col <- chr_candidates[chr_candidates %in% names(df)][1]
+  start_col <- start_candidates[start_candidates %in% names(df)][1]
+  end_col <- end_candidates[end_candidates %in% names(df)][1]
+  
+  if (is.na(chr_col) | is.na(start_col) | is.na(end_col)) {
+    stop(
+      "Could not detect CHR/start/end columns in the significant windows file.\n",
+      "Available columns are:\n",
+      paste(names(df), collapse = ", ")
+    )
+  }
+  
+  df %>%
+    rename(
+      CHR = all_of(chr_col),
+      START = all_of(start_col),
+      END = all_of(end_col)
+    ) %>%
+    mutate(
+      CHR = as.character(CHR),
+      START = as.numeric(START),
+      END = as.numeric(END)
+    )
+}
+```
+
+## 5.8. Extract local score outliers
+
+```{r}
+
+extract_local_score_outliers_one_contrast <- function(local_score_file,
+                                                      windows_file,
+                                                      contrast_id) {
+  
+  local_scores <- read_flexible_table(local_score_file) %>%
+    standardise_chr_pos()
+  
+  windows <- read_flexible_table(windows_file) %>%
+    standardise_windows()
+  
+  local_scores %>%
+    inner_join(
+      windows,
+      by = "CHR",
+      relationship = "many-to-many"
+    ) %>%
+    filter(POS >= START, POS <= END) %>%
+    distinct(CHR, POS, SNP_ID) %>%
+    mutate(
+      contrast_id = contrast_id,
+      method = "LocalScores"
+    )
+}
+
+```
+
+# 6. Read method-specific outliers
+
+## 6.1. `BayPass`C2 statistic outliers
+
+```{r}
+
+C2_outliers <- read_outlier_flag_table(
+  file = C2_file,
+  method_name = "BayPass_C2"
+)
+
+n_distinct(C2_outliers$SNP_ID)
+
+```
+
+## 6.2. `BayPass` BF statistic outliers
+
+```{r}
+
+BF_outliers <- read_outlier_flag_table(
+  file = BF_file,
+  method_name = "BayPass_BF"
+)
+
+n_distinct(BF_outliers$SNP_ID)
+
+```
+
+## 6.3. `Bayescan` outliers
+
+```{r}
+BayeScan_outliers <- read_simple_outlier_table(
+  file = bayescan_file,
+  method_name = "BayeScan"
+)
+
+n_distinct(BayeScan_outliers$SNP_ID)
+```
+
+## 6.4. `PCAdapt` Bonferroni correction outliers
+
+```{r}
+
+PCAdapt_Bonferroni_outliers <- read_simple_outlier_table(
+  file = pcadapt_bonferroni_file,
+  method_name = "PCAdapt_Bonferroni"
+)
+
+n_distinct(PCAdapt_Bonferroni_outliers$SNP_ID)
+
+```
+
+## 6.5. `BayPass` Local Scores
+
+```{r}
+
+LocalScores_outliers <- purrr::pmap_dfr(
+  local_score_files,
+  function(contrast_id, local_scores, significant_windows) {
+    
+    extract_local_score_outliers_one_contrast(
+      local_score_file = local_scores,
+      windows_file = significant_windows,
+      contrast_id = contrast_id
+    )
+  }
+) %>%
+  distinct(CHR, POS, SNP_ID, method)
+
+n_distinct(LocalScores_outliers$SNP_ID)
+
+```
+
+# 7. Summary of the number of outliers per method
+
+```{r}
+
+method_counts <- tibble(
+  method = c(
+    "BayPass_C2",
+    "BayPass_BF",
+    #"BayeScan",
+    "PCAdapt_Bonferroni",
+    "LocalScores"
+  ),
+  n_outliers = c(
+    n_distinct(C2_outliers$SNP_ID),
+    n_distinct(BF_outliers$SNP_ID),
+    #n_distinct(BayeScan_outliers$SNP_ID),
+    n_distinct(PCAdapt_Bonferroni_outliers$SNP_ID),
+    n_distinct(LocalScores_outliers$SNP_ID)
+  )
+)
+
+method_counts
+
+write_csv(
+  method_counts,
+  file.path(output_dir, paste0(species_prefix, "_method_counts.csv"))
+)
+
+```
+
+# 8. Build the overlap master table
+
+```{r}
+
+# 8. Build the overlap master table
+
+all_outliers_long <- bind_rows(
+  C2_outliers,
+  BF_outliers,
+  BayeScan_outliers,
+  PCAdapt_Bonferroni_outliers,
+  LocalScores_outliers
+) %>%
+  mutate(
+    method = case_when(
+      method == "LocalScores" ~ "BayPass_LocalScores",
+      method == "PCAdapt_Bonferroni" ~ "PCAdapt",
+      TRUE ~ method
+    )
+  ) %>%
+  distinct(CHR, POS, SNP_ID, method)
+
+methods <- c(
+  "BayPass_C2",
+  "BayPass_BF",
+  "BayPass_LocalScores",
+  #"BayeScan",
+  "PCAdapt"
+)
+
+# Check if method names are correct before pivoting
+print(sort(unique(all_outliers_long$method)))
+
+missing_methods_in_long <- setdiff(methods, unique(all_outliers_long$method))
+
+if (length(missing_methods_in_long) > 0) {
+  warning(
+    "These methods are not present in all_outliers_long: ",
+    paste(missing_methods_in_long, collapse = ", ")
+  )
+}
+
+upset_master_table <- all_outliers_long %>%
+  mutate(value = TRUE) %>%
+  pivot_wider(
+    id_cols = c(CHR, POS, SNP_ID),
+    names_from = method,
+    values_from = value,
+    values_fill = FALSE
+  )
+
+# Add missing methods only if they are truly absent
+for (m in methods) {
+  if (!m %in% names(upset_master_table)) {
+    upset_master_table[[m]] <- FALSE
+  }
+}
+
+upset_master_table <- upset_master_table %>%
+  mutate(
+    n_methods = rowSums(across(all_of(methods))),
+    overlap_category = case_when(
+      n_methods == 1 ~ "Detected by 1 method",
+      n_methods == 2 ~ "Detected by 2 methods",
+      n_methods == 3 ~ "Detected by 3 methods",
+      n_methods == 4 ~ "Detected by 4 methods",
+      #n_methods == 5 ~ "Detected by 5 methods",
+      TRUE ~ "Not detected"
+    )
+  ) %>%
+  arrange(desc(n_methods), CHR, POS)
+
+glimpse(upset_master_table)
+
+# Check final counts per method
+method_counts_from_master <- upset_master_table %>%
+  summarise(across(all_of(methods), ~sum(.x))) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "method",
+    values_to = "n_outliers"
+  )
+
+print(method_counts_from_master)
+
+# Save as .csv
+
+write_csv(
+  upset_master_table,
+  file.path(output_dir, paste0(species_prefix, "_master_outlier_overlap_table.csv"))
+)
+
+write_csv(
+  upset_master_table %>% filter(n_methods >= 2),
+  file.path(output_dir, paste0(species_prefix, "_outliers_shared_by_2_or_more_methods.csv"))
+)
+
+write_csv(
+  upset_master_table %>% filter(n_methods >= 3),
+  file.path(output_dir, paste0(species_prefix, "_outliers_shared_by_3_or_more_methods.csv"))
+)
+
+write_csv(
+  upset_master_table %>% filter(n_methods >= 4),
+  file.path(output_dir, paste0(species_prefix, "_outliers_shared_by_4_or_more_methods.csv"))
+)
+
+#write_csv(
+  #upset_master_table %>% filter(n_methods == 5),
+  #file.path(output_dir, paste0(species_prefix, "_outliers_shared_by_all_5_methods.csv"))
+#)
+
+```
+
+# 9. Summary of the number of overlaping outliers/methods
+
+```{r}
+
+summary_by_support <- upset_master_table %>%
+  count(n_methods, overlap_category, name = "n_snps") %>%
+  arrange(desc(n_methods))
+
+summary_by_support
+
+write_csv(
+  summary_by_support,
+  file.path(output_dir, paste0(species_prefix, "_summary_by_number_of_methods.csv"))
+)
+
+```
+
+# 10. Prepare the input list for `ggVennDiagram`
+
+```{r}
+
+outlier_list <- list(
+  BayPass_C2 = unique(C2_outliers$SNP_ID),
+  BayPass_BF = unique(BF_outliers$SNP_ID),
+  #BayeScan = unique(BayeScan_outliers$SNP_ID),
+  PCAdapt_Bonferroni = unique(PCAdapt_Bonferroni_outliers$SNP_ID),
+  LocalScores = unique(LocalScores_outliers$SNP_ID)
+)
+
+outlier_list <- lapply(outlier_list, function(x) {
+  unique(x[!is.na(x) & x != ""])
+})
+
+str(outlier_list)
+
+```
+
+# 11. UpSet plot and save it (For AND and BOM)
+
+```{r}
+# ============================================================
+# UpSet plot
+# Intersections shared by 2, 3, 4 or 5 methods
+# Highlight 3+/4+/5-method intersections in red
+# ============================================================
+
+library(ComplexUpset)
+library(ggplot2)
+library(dplyr)
+
+methods <- c(
+  "BayPass_C2",
+  "BayPass_BF",
+  "BayPass_LocalScores",
+  #"BayeScan",
+  "PCAdapt"
+)
+
+methods_plot <- rev(methods)
+
+upset_master_table_2plus <- upset_master_table %>%
+  filter(n_methods %in% c(2, 3, 4, 5)) %>%
+  mutate(
+    intersection_support = if_else(
+      n_methods >= 3,
+      "Shared by 3 or 4 methods",
+      "Shared by 2 methods"
+    ),
+    intersection_support = factor(
+      intersection_support,
+      levels = c(
+        "Shared by 2 methods",
+        "Shared by 3 or 4 methods"
+      )
+    )
+  )
+
+intersection_counts_2plus <- upset_master_table_2plus %>%
+  count(across(all_of(methods)), name = "intersection_size")
+
+max_intersection_size <- max(intersection_counts_2plus$intersection_size)
+
+size <- get_size_mode("exclusive_intersection")
+
+upset_plot <- upset(
+  upset_master_table_2plus,
+  intersect = methods_plot,
+  name = "Method",
+  sort_sets = FALSE,
+  min_size = 1,
+  sort_intersections_by = "cardinality",
+  width_ratio = 0.10,
+  
+  matrix = intersection_matrix(
+    geom = geom_point(size = 3),
+    segment = geom_segment(linewidth = 0.6)
+  ),
+  
+  base_annotations = list(
+    "Intersection size" = (
+      intersection_size(
+        mapping = aes(
+          fill = intersection_support
+        ),
+        text_mapping = aes(
+          label = paste0(
+            !!upset_text_percentage(digits = 1),
+            "\n(",
+            !!size,
+            ")"
+          ),
+          y = !!size + max_intersection_size * 0.08
+        ),
+        text = list(
+          colour = "black",
+          size = 3
+        )
+      ) +
+        scale_fill_manual(
+          values = c(
+            "Shared by 2 methods" = "grey40",
+            "Shared by 3 or 4 methods" = "red3"
+          ),
+          name = "Intersection support"
+        ) +
+        scale_y_continuous(
+          limits = c(0, max_intersection_size * 1.45),
+          expand = expansion(mult = c(0, 0.02))
+        ) +
+        ylab("Intersection size") +
+        theme(
+          plot.background = element_rect(fill = "#E5D3B3", colour = NA),
+          panel.background = element_rect(fill = "#E5D3B3", colour = NA),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank()
+        )
+    )
+  ),
+  
+  set_sizes = (
+    upset_set_size(
+      geom = geom_bar(width = 0.7, fill = "grey40")
+    ) +
+      xlab("Set size")
+  )
+) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.4
+    ),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+upset_plot
+
+ggsave(
+  filename = file.path(
+    output_dir,
+    paste0(species_prefix, "_UpSet_outlier_overlap_5_methods_ComplexUpset.png")
+  ),
+  plot = upset_plot,
+  width = 11,
+  height = 7,
+  dpi = 400
+)
+
+```
+
+# 12. UpSet plot and save it (For LML)
+
+```{r}
+# ============================================================
+# UpSet plot
+# Intersections shared by 1 or 2 methods
+# Highlight 2-method intersections in red
+# ============================================================
+
+library(ComplexUpset)
+library(ggplot2)
+library(dplyr)
+
+methods <- c(
+  "BayPass_C2",
+  "BayPass_BF",
+  "BayPass_LocalScores",
+  #"BayeScan",
+  "PCAdapt"
+)
+
+methods_plot <- rev(methods)
+
+# Keep only SNPs detected by 1 or 2 methods
+# Exclude the "Not detected" row
+upset_master_table_1to2 <- upset_master_table %>%
+  filter(n_methods %in% c(1, 2)) %>%
+  mutate(
+    intersection_support = if_else(
+      n_methods == 2,
+      "Shared by 2 methods",
+      "Shared by 1 method"
+    ),
+    intersection_support = factor(
+      intersection_support,
+      levels = c(
+        "Shared by 1 method",
+        "Shared by 2 methods"
+      )
+    )
+  )
+
+# Calculate intersection sizes
+intersection_counts_1to2 <- upset_master_table_1to2 %>%
+  count(across(all_of(methods)), name = "intersection_size")
+
+max_intersection_size <- max(intersection_counts_1to2$intersection_size)
+
+size <- get_size_mode("exclusive_intersection")
+
+upset_plot <- upset(
+  upset_master_table_1to2,
+  intersect = methods_plot,
+  name = "Method",
+  sort_sets = FALSE,
+  min_size = 1,
+  sort_intersections_by = "cardinality",
+  width_ratio = 0.10,
+
+  matrix = intersection_matrix(
+    geom = geom_point(size = 3),
+    segment = geom_segment(linewidth = 0.6)
+  ),
+
+  base_annotations = list(
+    "Intersection size" = (
+      intersection_size(
+        mapping = aes(
+          fill = intersection_support
+        ),
+        text_mapping = aes(
+          label = paste0(
+            !!upset_text_percentage(digits = 1),
+            "\n(",
+            !!size,
+            ")"
+          ),
+          y = !!size + max_intersection_size * 0.08
+        ),
+        text = list(
+          colour = "black",
+          size = 3
+        )
+      ) +
+        scale_fill_manual(
+          values = c(
+            "Shared by 1 method" = "grey40",
+            "Shared by 2 methods" = "red3"
+          ),
+          drop = TRUE,
+          name = NULL
+        ) +
+        scale_y_continuous(
+          limits = c(0, max_intersection_size * 1.45),
+          expand = expansion(mult = c(0, 0.02))
+        ) +
+        ylab("Intersection size") +
+        theme(
+          plot.background = element_rect(fill = "#E5D3B3", colour = NA),
+          panel.background = element_rect(fill = "#E5D3B3", colour = NA),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank()
+        )
+    )
+  ),
+
+  set_sizes = (
+    upset_set_size(
+      geom = geom_bar(width = 0.7, fill = "grey40")
+    ) +
+      xlab("Set size")
+  )
+) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.4
+    ),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+upset_plot
+
+ggsave(
+  filename = file.path(
+    output_dir,
+    paste0(species_prefix, "_UpSet_outlier_overlap_4_methods_ComplexUpset.png")
+  ),
+  plot = upset_plot,
+  width = 11,
+  height = 7,
+  dpi = 400
+)
+```
+
+
+# 13. Save as RDS
+
+```{r}
+
+saveRDS(
+  outlier_list,
+  file.path(output_dir, paste0(species_prefix, "_outlier_list_for_ggVennDiagram.rds"))
+)
+
+saveRDS(
+  venn_obj,
+  file.path(output_dir, paste0(species_prefix, "_venn_object_for_ggVennDiagram.rds"))
+)
+
+```
+
+# 14. Test area
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
