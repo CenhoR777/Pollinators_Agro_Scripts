@@ -1,0 +1,2143 @@
+---
+title: "Candidate Gene Annotation of Outlier SNPs"
+subtitle: "Overlap between candidate outliers and genome annotation"
+author: "André F. Henriques"
+date: today
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    toc-float: true
+    number-sections: true
+    number-depth: 4
+    code-fold: false
+    code-tools: true
+    code-overflow: wrap
+    self-contained: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+editor: source
+---
+
+# 1. Introduction
+
+This report links previously detected outlier SNPs to genome annotation features.
+
+For each outlier SNP, the report identifies:
+
+genes directly overlapping the SNP;
+the nearest gene when the SNP is intergenic;
+distance to the nearest gene;
+gene identifiers and annotation attributes extracted from the GFF/GTF file;
+candidate gene lists for downstream functional annotation with tools such as `eggNOG-mapper` or `InterProScan`.
+
+# 2. Packages
+
+## 2.1. Install packages
+
+```{r}
+packages_cran <- c(
+  "tidyverse",
+  "janitor",
+  "readr"
+)
+
+for (pkg in packages_cran) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+packages_bioc <- c(
+  "GenomicRanges",
+  "IRanges",
+  "rtracklayer"
+)
+
+for (pkg in packages_bioc) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg)
+  }
+}
+
+```
+
+## 2.2. Load packages
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(stringr)
+library(readr)
+
+library(GenomicRanges)
+library(IRanges)
+library(rtracklayer)
+```
+
+# 3. General settings
+
+Only change the species prefix.
+
+```{r}
+species_prefix <- "AND"
+
+species_name <- case_when(
+  species_prefix == "AND" ~ "Andrena flavipes",
+  species_prefix == "BOM" ~ "Bombus terrestris",
+  species_prefix == "LML" ~ "Lasioglossum malachurum",
+  TRUE ~ "Unknown species"
+)
+
+base_dir <- "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/7_seldetection"
+
+outlier_overlap_dir <- file.path(
+  base_dir,
+  "merged_graphs",
+  "UpSet_plots",
+  species_prefix
+)
+
+annotation_output_dir <- file.path(
+  base_dir,
+  "functional_annotation",
+  species_prefix
+)
+
+dir.create(annotation_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+species_name
+outlier_overlap_dir
+annotation_output_dir
+```
+
+# 4. Input files for AND
+
+Need to be adapted for the species (AND, BOM, LML)
+
+```{r}
+# outliers shared by at least 3 methods
+outlier_file_3plus <- file.path(
+  outlier_overlap_dir,
+  paste0(species_prefix, "_outliers_shared_by_3_or_more_methods.csv")
+)
+
+annotation_file <- "/mnt/data2/Project_Polli_agro/Operational/6_reference_genomes/Blast_analysis_files/AND/AND_genes.gtf"
+
+outlier_file_3plus
+annotation_file
+
+file.exists(outlier_file_3plus)
+file.exists(annotation_file)
+```
+
+## 4.1 Read outlier tables
+
+```{r}
+outliers_raw <- read_csv(
+  outlier_file_3plus,
+  show_col_types = FALSE
+) %>%
+  clean_names()
+
+glimpse(outliers_raw)
+names(outliers_raw)
+
+# checks that the expected columns exist
+required_outlier_cols <- c(
+  "chr",
+  "pos",
+  "snp_id",
+  "bay_pass_c2",
+  "bay_pass_bf",
+  "baye_scan",
+  "pc_adapt",
+  "bay_pass_local_scores",
+  "n_methods",
+  "overlap_category"
+)
+
+missing_outlier_cols <- setdiff(required_outlier_cols, names(outliers_raw))
+
+if (length(missing_outlier_cols) > 0) {
+  stop(
+    "Missing expected columns in outliers_raw: ",
+    paste(missing_outlier_cols, collapse = ", ")
+  )
+}
+
+# standardize column names
+outliers <- outliers_raw %>%
+  dplyr::rename(
+    CHR = dplyr::all_of("chr"),
+    POS = dplyr::all_of("pos"),
+    SNP_ID = dplyr::all_of("snp_id")
+  ) %>%
+  dplyr::mutate(
+    CHR = as.character(CHR),
+    POS = as.numeric(POS),
+    SNP_ID = as.character(SNP_ID)
+  )
+
+glimpse(outliers)
+
+nrow(outliers)
+n_distinct(outliers$SNP_ID)
+```
+
+## 4.2. Read genome annotation file
+
+```{r}
+annotation_gr <- rtracklayer::import(annotation_file)
+
+annotation_gr
+table(annotation_gr$type)
+
+# The object annotation_gr is a GRanges object containing all annotation features
+
+```
+
+## 4.3. Extract genes
+
+```{r}
+# This keeps only annotation features of type "gene"
+genes_gr <- annotation_gr[annotation_gr$type == "gene"]
+
+genes_gr
+length(genes_gr)
+
+if (length(genes_gr) == 0) {
+  stop("No features with type == 'gene' were found in the annotation file.")
+}
+```
+
+## 4.4. Harmonise chromosome names
+
+outlier_table - CHR1, CHR2, etc
+gtf_file - 1, 2, etc
+
+This is necessary because findOverlaps() only works if the SNP and gene coordinates use the same chromosome names.
+
+```{r}
+gtf_chrs <- unique(as.character(seqnames(genes_gr)))
+
+outliers_mapped <- outliers %>%
+  dplyr::mutate(
+    CHR_original = CHR,
+    CHR = stringr::str_remove(CHR, "^CHR")
+  )
+
+cat("Outlier chromosome examples before mapping:\n")
+print(head(unique(outliers$CHR), 30))
+
+cat("\nMapped outlier chromosome examples:\n")
+print(head(unique(outliers_mapped$CHR), 30))
+
+cat("\nGTF chromosome examples:\n")
+print(head(gtf_chrs, 30))
+
+cat("\nNumber shared after mapping:", length(intersect(unique(outliers_mapped$CHR), gtf_chrs)), "\n")
+
+outliers_mapped <- outliers_mapped %>%
+  dplyr::filter(CHR %in% gtf_chrs)
+
+cat("Rows after mapping:", nrow(outliers_mapped), "\n")
+cat("Unique SNPs after mapping:", dplyr::n_distinct(outliers_mapped$SNP_ID), "\n")
+
+if (nrow(outliers_mapped) == 0) {
+  stop("No AND outlier chromosomes matched the annotation after chromosome harmonisation.")
+}
+
+```
+
+## 4.3. Convert outliers/genes to GenomicRanges
+
+This converts SNPs into genomic intervals
+
+Each SNP becomes a 1 bp interval
+
+This is the object used for genomic overlap analysis
+
+```{r}
+# Convert outliers to GenomicRanges
+outlier_gr <- GenomicRanges::GRanges(
+  seqnames = outliers_mapped$CHR,
+  ranges = IRanges::IRanges(
+    start = outliers_mapped$POS,
+    end = outliers_mapped$POS
+  ),
+  SNP_ID = outliers_mapped$SNP_ID
+)
+
+outlier_gr
+
+# Convert gene annotation to table
+genes_table <- as_tibble(genes_gr) %>%
+  janitor::clean_names() %>%
+  dplyr::mutate(
+    CHR = as.character(seqnames),
+    gene_start = start,
+    gene_end = end,
+    gene_strand = as.character(strand)
+  )
+
+glimpse(genes_table)
+```
+
+# 5. Extract gene IDs from GTF
+
+This section standardises gene identifiers
+
+```{r}
+extract_first_available_column <- function(df, candidates) {
+  
+  available <- candidates[candidates %in% names(df)]
+  
+  if (length(available) == 0) {
+    return(rep(NA_character_, nrow(df)))
+  }
+  
+  df[[available[1]]]
+}
+
+genes_table <- genes_table %>%
+  dplyr::mutate(
+    gene_id = extract_first_available_column(
+      .,
+      c("gene_id", "id", "gene", "locus_tag", "name")
+    ),
+    
+    gene_name = extract_first_available_column(
+      .,
+      c("gene_name", "gene", "name", "product")
+    ),
+    
+    gene_description = extract_first_available_column(
+      .,
+      c("description", "product", "note", "gene_biotype")
+    )
+  ) %>%
+  dplyr::mutate(
+    gene_id = as.character(gene_id),
+    gene_name = as.character(gene_name),
+    gene_description = as.character(gene_description)
+  )
+
+genes_table %>%
+  dplyr::select(
+    CHR,
+    gene_start,
+    gene_end,
+    gene_strand,
+    gene_id,
+    gene_name,
+    gene_description
+  ) %>%
+  head()
+```
+
+# 6. Find outlier SNPs overlapping genes
+
+Which outlier SNPs physically fall inside gene coordinates?
+
+relation_to_gene = "overlapping"
+distance_to_gene = 0
+
+```{r}
+overlap_hits <- GenomicRanges::findOverlaps(
+  query = outlier_gr,
+  subject = genes_gr,
+  ignore.strand = TRUE
+)
+
+overlap_hits
+length(overlap_hits)
+
+if (length(overlap_hits) > 0) {
+  
+  outlier_gene_overlaps <- tibble(
+    outlier_index = queryHits(overlap_hits),
+    gene_index = subjectHits(overlap_hits)
+  ) %>%
+    bind_cols(
+      outliers_mapped[.$outlier_index, ] %>%
+        dplyr::select(CHR, CHR_original, POS, SNP_ID, everything())
+    ) %>%
+    bind_cols(
+      genes_table[.$gene_index, ] %>%
+        dplyr::select(
+          gene_chr = CHR,
+          gene_start,
+          gene_end,
+          gene_strand,
+          gene_id,
+          gene_name,
+          gene_description
+        )
+    ) %>%
+    dplyr::mutate(
+      relation_to_gene = "overlapping",
+      distance_to_gene = 0
+    )
+  
+} else {
+  
+  outlier_gene_overlaps <- tibble(
+    CHR = character(),
+    CHR_original = character(),
+    POS = numeric(),
+    SNP_ID = character(),
+    gene_chr = character(),
+    gene_start = numeric(),
+    gene_end = numeric(),
+    gene_strand = character(),
+    gene_id = character(),
+    gene_name = character(),
+    gene_description = character(),
+    relation_to_gene = character(),
+    distance_to_gene = numeric()
+  )
+}
+
+glimpse(outlier_gene_overlaps)
+
+n_distinct(outlier_gene_overlaps$SNP_ID)
+n_distinct(outlier_gene_overlaps$gene_id)
+```
+
+# 7. Find nearest gene for all outlier SNPs
+
+This section finds the nearest gene to every outlier SNP
+
+This produces a nearest gene for each SNP, even if the SNP is intergenic
+
+```{r}
+nearest_gene_index <- GenomicRanges::nearest(
+  x = outlier_gr,
+  subject = genes_gr,
+  ignore.strand = TRUE
+)
+
+nearest_gene_table <- outliers_mapped %>%
+  dplyr::mutate(
+    nearest_gene_index = nearest_gene_index
+  ) %>%
+  dplyr::filter(!is.na(nearest_gene_index)) %>%
+  bind_cols(
+    genes_table[.$nearest_gene_index, ] %>%
+      dplyr::select(
+        nearest_gene_chr = CHR,
+        nearest_gene_start = gene_start,
+        nearest_gene_end = gene_end,
+        nearest_gene_strand = gene_strand,
+        nearest_gene_id = gene_id,
+        nearest_gene_name = gene_name,
+        nearest_gene_description = gene_description
+      )
+  ) %>%
+  dplyr::mutate(
+    distance_to_nearest_gene = dplyr::case_when(
+      CHR != nearest_gene_chr ~ NA_real_,
+      POS >= nearest_gene_start & POS <= nearest_gene_end ~ 0,
+      POS < nearest_gene_start ~ nearest_gene_start - POS,
+      POS > nearest_gene_end ~ POS - nearest_gene_end,
+      TRUE ~ NA_real_
+    ),
+    relation_to_nearest_gene = dplyr::case_when(
+      distance_to_nearest_gene == 0 ~ "overlapping",
+      distance_to_nearest_gene > 0 ~ "intergenic_nearest",
+      TRUE ~ NA_character_
+    )
+  )
+
+glimpse(nearest_gene_table)
+
+n_distinct(nearest_gene_table$SNP_ID)
+n_distinct(nearest_gene_table$nearest_gene_id)
+```
+
+# 8. Build candidate gene table
+
+Which genes are associated with my strongest outlier SNPs?
+
+For intergenic SNPs, only keep the nearest gene if it is within 50 kb.
+
+```{r}
+nearest_gene_distance_threshold <- 50000
+
+overlapping_snp_ids <- unique(outlier_gene_overlaps$SNP_ID)
+
+intergenic_nearest_genes <- nearest_gene_table %>%
+  dplyr::filter(!SNP_ID %in% overlapping_snp_ids)
+
+candidate_genes_from_overlaps <- outlier_gene_overlaps %>%
+  dplyr::transmute(
+    CHR,
+    CHR_original,
+    POS,
+    SNP_ID,
+    candidate_gene_id = gene_id,
+    candidate_gene_name = gene_name,
+    candidate_gene_description = gene_description,
+    candidate_gene_chr = gene_chr,
+    candidate_gene_start = gene_start,
+    candidate_gene_end = gene_end,
+    candidate_gene_strand = gene_strand,
+    relation_to_gene = "overlapping",
+    distance_to_gene = 0
+  )
+
+candidate_genes_from_nearest <- intergenic_nearest_genes %>%
+  dplyr::filter(distance_to_nearest_gene <= nearest_gene_distance_threshold) %>%
+  dplyr::transmute(
+    CHR,
+    CHR_original,
+    POS,
+    SNP_ID,
+    candidate_gene_id = nearest_gene_id,
+    candidate_gene_name = nearest_gene_name,
+    candidate_gene_description = nearest_gene_description,
+    candidate_gene_chr = nearest_gene_chr,
+    candidate_gene_start = nearest_gene_start,
+    candidate_gene_end = nearest_gene_end,
+    candidate_gene_strand = nearest_gene_strand,
+    relation_to_gene = paste0("nearest_within_", nearest_gene_distance_threshold / 1000, "kb"),
+    distance_to_gene = distance_to_nearest_gene
+  )
+
+candidate_gene_table <- bind_rows(
+  candidate_genes_from_overlaps,
+  candidate_genes_from_nearest
+) %>%
+  dplyr::distinct(
+    SNP_ID,
+    candidate_gene_id,
+    relation_to_gene,
+    .keep_all = TRUE
+  ) %>%
+  dplyr::arrange(CHR, POS, distance_to_gene)
+
+glimpse(candidate_gene_table)
+
+n_distinct(candidate_gene_table$SNP_ID)
+n_distinct(candidate_gene_table$candidate_gene_id)
+```
+
+## 8.1 Add method-support information
+
+This section adds back the outlier-detection method information
+
+This SNP is linked to this candidate gene, and this SNP was supported by X methods
+
+```{r}
+method_columns <- c(
+  "bay_pass_c2",
+  "bay_pass_bf",
+  "baye_scan",
+  "pc_adapt",
+  "bay_pass_local_scores",
+  "n_methods",
+  "overlap_category"
+)
+
+available_method_columns <- method_columns[method_columns %in% names(outliers_mapped)]
+
+available_method_columns
+
+candidate_gene_table_full <- candidate_gene_table %>%
+  dplyr::left_join(
+    outliers_mapped %>%
+      dplyr::select(SNP_ID, dplyr::any_of(available_method_columns)),
+    by = "SNP_ID"
+  ) %>%
+  dplyr::arrange(desc(n_methods), CHR, POS, distance_to_gene)
+
+glimpse(candidate_gene_table_full)
+```
+
+# 9. Save output files
+
+```{r}
+output_suffix <- paste0(
+  species_prefix,
+  "_outliers_shared_by_3_or_more_methods"
+)
+
+write_csv(
+  candidate_gene_table_full,
+  file.path(
+    annotation_output_dir,
+    paste0(output_suffix, "_candidate_genes_from_outlier_SNPs.csv")
+  )
+)
+
+write_csv(
+  outlier_gene_overlaps,
+  file.path(
+    annotation_output_dir,
+    paste0(output_suffix, "_outlier_SNPs_overlapping_genes.csv")
+  )
+)
+
+write_csv(
+  nearest_gene_table,
+  file.path(
+    annotation_output_dir,
+    paste0(output_suffix, "_outlier_SNPs_nearest_genes.csv")
+  )
+)
+
+write_csv(
+  intergenic_nearest_genes,
+  file.path(
+    annotation_output_dir,
+    paste0(output_suffix, "_intergenic_outlier_SNPs_nearest_genes.csv")
+  )
+)
+
+```
+
+## 9.1. Candidate gene IDs
+
+```{r}
+candidate_gene_ids <- candidate_gene_table_full %>%
+  dplyr::filter(!is.na(candidate_gene_id)) %>%
+  dplyr::distinct(candidate_gene_id) %>%
+  dplyr::arrange(candidate_gene_id)
+
+write_tsv(
+  candidate_gene_ids,
+  file.path(
+    annotation_output_dir,
+    paste0(output_suffix, "_candidate_gene_ids.txt")
+  ),
+  col_names = FALSE
+)
+
+summary_candidate_genes <- candidate_gene_table_full %>%
+  dplyr::summarise(
+    species = species_name,
+    outlier_input = "outliers_shared_by_3_or_more_methods",
+    n_outlier_snps_input = n_distinct(SNP_ID),
+    n_candidate_genes = n_distinct(candidate_gene_id),
+    n_overlapping_gene_records = sum(relation_to_gene == "overlapping", na.rm = TRUE),
+    n_nearest_gene_records = sum(str_detect(relation_to_gene, "^nearest_within_"), na.rm = TRUE),
+    nearest_gene_distance_threshold_bp = nearest_gene_distance_threshold
+  )
+
+summary_candidate_genes
+
+write_csv(
+  summary_candidate_genes,
+  file.path(
+    annotation_output_dir,
+    paste0(output_suffix, "_candidate_gene_annotation_summary.csv")
+  )
+)
+
+list.files(annotation_output_dir, full.names = TRUE)
+```
+
+# 10. Candidate summary
+
+Summary report
+
+## 10.1. Gene-level
+
+This is very important for interpretation because the SNP-level table can contain repeated genes
+
+For example, several SNPs may point to the same gene
+
+This is probably the best pre `eggNOG` table for biological interpretation
+
+```{r}
+candidate_genes_gene_level <- candidate_gene_table_full %>%
+  dplyr::group_by(
+    candidate_gene_id,
+    candidate_gene_name,
+    candidate_gene_description,
+    candidate_gene_chr,
+    candidate_gene_start,
+    candidate_gene_end,
+    candidate_gene_strand
+  ) %>%
+  dplyr::summarise(
+    n_outlier_snps = n_distinct(SNP_ID),
+    snps = paste(unique(SNP_ID), collapse = "; "),
+    original_chromosomes = paste(unique(CHR_original), collapse = "; "),
+    positions = paste(unique(POS), collapse = "; "),
+    relation_types = paste(unique(relation_to_gene), collapse = "; "),
+    min_distance_to_gene = suppressWarnings(min(distance_to_gene, na.rm = TRUE)),
+    max_method_support = suppressWarnings(max(n_methods, na.rm = TRUE)),
+    overlap_categories = paste(unique(overlap_category), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    desc(max_method_support),
+    desc(n_outlier_snps),
+    min_distance_to_gene,
+    candidate_gene_chr,
+    candidate_gene_start
+  )
+
+candidate_genes_gene_level
+
+write_csv(
+  candidate_genes_gene_level,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_candidate_genes_gene_level_summary.csv")
+  )
+)
+
+# This counts how many candidate genes came from each relation type
+candidate_genes_relation_summary <- candidate_genes_gene_level %>%
+  dplyr::count(
+    relation_types,
+    name = "n_candidate_genes"
+  ) %>%
+  dplyr::arrange(desc(n_candidate_genes))
+
+write_csv(
+  candidate_genes_relation_summary,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_candidate_genes_relation_summary.csv")
+  )
+)
+
+# This counts candidate genes by maximum method support
+candidate_genes_method_support_summary <- candidate_genes_gene_level %>%
+  dplyr::count(
+    max_method_support,
+    name = "n_candidate_genes"
+  ) %>%
+  dplyr::arrange(desc(max_method_support))
+
+write_csv(
+  candidate_genes_method_support_summary,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_candidate_genes_method_support_summary.csv")
+  )
+)
+
+```
+
+## 10.2. Feature-level
+
+Is the SNP in a transcript?
+Is it in an exon?
+Is it in a CDS?
+Is it in a start codon or stop codon?
+
+```{r}
+feature_types_to_check <- c(
+  "gene",
+  "transcript",
+  "mRNA",
+  "exon",
+  "CDS",
+  "five_prime_utr",
+  "three_prime_utr",
+  "five_prime_UTR",
+  "three_prime_UTR",
+  "start_codon",
+  "stop_codon"
+)
+
+# Classify the functional genomic context of each SNP
+feature_gr <- annotation_gr[annotation_gr$type %in% feature_types_to_check]
+
+table(feature_gr$type)
+
+feature_hits <- GenomicRanges::findOverlaps(
+  query = outlier_gr,
+  subject = feature_gr,
+  ignore.strand = TRUE
+)
+
+length(feature_hits)
+
+```
+
+### 10.2.1. Convert feature overlaps to a table
+
+This table can have multiple rows per SNP because one SNP may overlap several annotation features
+
+For example, one SNP could overlap:
+
+gene
+transcript
+exon
+CDS
+
+```{r}
+feature_table <- as_tibble(feature_gr) %>%
+  janitor::clean_names() %>%
+  dplyr::mutate(
+    feature_chr = as.character(seqnames),
+    feature_start = start,
+    feature_end = end,
+    feature_strand = as.character(strand),
+    feature_type = type
+  )
+
+if (length(feature_hits) > 0) {
+  
+  snp_feature_annotation <- tibble(
+    outlier_index = queryHits(feature_hits),
+    feature_index = subjectHits(feature_hits)
+  ) %>%
+    bind_cols(
+      outliers_mapped[.$outlier_index, ] %>%
+        dplyr::select(
+          CHR,
+          CHR_original,
+          POS,
+          SNP_ID,
+          n_methods,
+          overlap_category
+        )
+    ) %>%
+    bind_cols(
+      feature_table[.$feature_index, ] %>%
+        dplyr::select(
+          feature_type,
+          feature_chr,
+          feature_start,
+          feature_end,
+          feature_strand,
+          dplyr::any_of(c(
+            "gene_id",
+            "transcript_id",
+            "id",
+            "parent",
+            "gene_name",
+            "gene_biotype",
+            "protein_id",
+            "product",
+            "description",
+            "note"
+          ))
+        )
+    ) %>%
+    dplyr::distinct() %>%
+    dplyr::arrange(
+      CHR_original,
+      POS,
+      feature_type,
+      feature_start
+    )
+  
+} else {
+  
+  snp_feature_annotation <- tibble(
+    CHR = character(),
+    CHR_original = character(),
+    POS = numeric(),
+    SNP_ID = character(),
+    n_methods = numeric(),
+    overlap_category = character(),
+    feature_type = character(),
+    feature_chr = character(),
+    feature_start = numeric(),
+    feature_end = numeric(),
+    feature_strand = character()
+  )
+}
+
+write_csv(
+  snp_feature_annotation,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_outlier_SNPs_feature_level_annotation.csv")
+  )
+)
+
+```
+
+### 10.2.2. Summarise feature types per SNP
+
+This collapses the feature-level table to one row per SNP
+
+This is useful to identify SNPs with stronger functional relevance
+
+SNP in CDS > SNP in intron > SNP intergenic, with the caveat that regulatory regions can also be important
+
+```{r}
+if (nrow(snp_feature_annotation) > 0) {
+  
+  snp_feature_summary <- snp_feature_annotation %>%
+    dplyr::mutate(
+      gene_id = if ("gene_id" %in% names(.)) gene_id else NA_character_,
+      transcript_id = if ("transcript_id" %in% names(.)) transcript_id else NA_character_,
+      gene_name = if ("gene_name" %in% names(.)) gene_name else NA_character_
+    ) %>%
+    dplyr::group_by(
+      SNP_ID,
+      CHR_original,
+      CHR,
+      POS,
+      n_methods,
+      overlap_category
+    ) %>%
+    dplyr::summarise(
+      feature_types = paste(sort(unique(feature_type)), collapse = "; "),
+      gene_ids = paste(sort(unique(na.omit(gene_id))), collapse = "; "),
+      transcript_ids = paste(sort(unique(na.omit(transcript_id))), collapse = "; "),
+      gene_names = paste(sort(unique(na.omit(gene_name))), collapse = "; "),
+      in_gene = any(feature_type == "gene"),
+      in_transcript = any(feature_type %in% c("transcript", "mRNA")),
+      in_exon = any(feature_type == "exon"),
+      in_CDS = any(feature_type == "CDS"),
+      in_5UTR = any(feature_type %in% c("five_prime_utr", "five_prime_UTR")),
+      in_3UTR = any(feature_type %in% c("three_prime_utr", "three_prime_UTR")),
+      in_start_codon = any(feature_type == "start_codon"),
+      in_stop_codon = any(feature_type == "stop_codon"),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(
+      desc(n_methods),
+      CHR_original,
+      POS
+    )
+  
+} else {
+  
+  snp_feature_summary <- tibble(
+    SNP_ID = character(),
+    CHR_original = character(),
+    CHR = character(),
+    POS = numeric(),
+    n_methods = numeric(),
+    overlap_category = character(),
+    feature_types = character(),
+    gene_ids = character(),
+    transcript_ids = character(),
+    gene_names = character(),
+    in_gene = logical(),
+    in_transcript = logical(),
+    in_exon = logical(),
+    in_CDS = logical(),
+    in_5UTR = logical(),
+    in_3UTR = logical(),
+    in_start_codon = logical(),
+    in_stop_codon = logical()
+  )
+}
+
+write_csv(
+  snp_feature_summary,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_outlier_SNPs_feature_type_summary.csv")
+  )
+)
+
+```
+
+### 10.2.3. Classify each SNP into broad context
+
+This simplifies the detailed feature annotation into broad classes
+
+This tells you whether each SNP is:
+
+CDS
+UTR
+exon_non_CDS
+likely_intronic
+other
+
+```{r}
+snp_context_summary <- snp_feature_summary %>%
+  dplyr::mutate(
+    broad_context = dplyr::case_when(
+      in_CDS ~ "CDS",
+      in_5UTR | in_3UTR ~ "UTR",
+      in_exon ~ "exon_non_CDS",
+      in_gene & !in_exon & !in_CDS & !in_5UTR & !in_3UTR ~ "likely_intronic",
+      TRUE ~ "other"
+    )
+  )
+
+snp_context_summary %>%
+  dplyr::count(broad_context, name = "n_snps") %>%
+  dplyr::arrange(desc(n_snps))
+
+write_csv(
+  snp_context_summary,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_outlier_SNPs_broad_context_summary.csv")
+  )
+)
+
+```
+
+# 11. Check the most important SNPs
+
+This creates a selected table with the most relevant SNP-level annotation columns
+
+```{r}
+most_important_outlier_snps <- snp_context_summary %>%
+  dplyr::arrange(desc(n_methods), broad_context, CHR_original, POS) %>%
+  dplyr::select(
+    SNP_ID,
+    CHR_original,
+    POS,
+    n_methods,
+    overlap_category,
+    broad_context,
+    feature_types,
+    gene_ids,
+    gene_names
+  )
+
+write_csv(
+  most_important_outlier_snps,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_MOST_IMPORTANT_outlier_SNPs_selected_context_summary.csv")
+  )
+)
+```
+
+# 12. Prepare the IDs for `eggNOG`
+
+`eggNOG` does not work directly from SNPs. It needs sequences, usually protein sequences
+
+Which transcript IDs correspond to my candidate genes?
+
+```{r}
+# This converts the full GTF to a normal table
+annotation_table <- as_tibble(annotation_gr) %>%
+  janitor::clean_names()
+
+names(annotation_table)
+table(annotation_table$type)
+
+# Gene-to-transcript mapping from AND GTF
+transcript_feature_types <- c("transcript", "mRNA")
+
+# extracts transcript rows
+gene_transcript_map <- annotation_table %>%
+  dplyr::filter(type %in% transcript_feature_types) %>%
+  dplyr::select(
+    dplyr::any_of(c(
+      "gene_id",
+      "transcript_id",
+      "gene",
+      "gene_name",
+      "gene_biotype",
+      "product",
+      "description"
+    ))
+  ) %>%
+  dplyr::distinct()
+
+write_csv(
+  gene_transcript_map,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_gene_transcript_map_from_GTF.csv")
+  )
+)
+
+# Add missing optional columns safely
+# This part is a safety step
+# This avoids errors in later mutate() steps
+if (!"gene_name" %in% names(gene_transcript_map)) {
+  gene_transcript_map$gene_name <- NA_character_
+}
+
+if (!"gene" %in% names(gene_transcript_map)) {
+  gene_transcript_map$gene <- NA_character_
+}
+
+if (!"description" %in% names(gene_transcript_map)) {
+  gene_transcript_map$description <- NA_character_
+}
+
+if (!"product" %in% names(gene_transcript_map)) {
+  gene_transcript_map$product <- NA_character_
+}
+
+if (!"gene_biotype" %in% names(gene_transcript_map)) {
+  gene_transcript_map$gene_biotype <- NA_character_
+}
+
+# Standardize gene/transcript map
+# This creates a cleaned version
+
+gene_transcript_map_clean <- gene_transcript_map %>%
+  dplyr::mutate(
+    gene_id = as.character(gene_id),
+    transcript_id = as.character(transcript_id),
+    
+    gene_name_final = dplyr::coalesce(
+      dplyr::na_if(as.character(.data$gene_name), ""),
+      dplyr::na_if(as.character(.data$gene), ""),
+      dplyr::na_if(as.character(.data$gene_id), "")
+    ),
+    
+    gene_description_final = dplyr::coalesce(
+      dplyr::na_if(as.character(.data$description), ""),
+      dplyr::na_if(as.character(.data$product), ""),
+      dplyr::na_if(as.character(.data$gene_biotype), "")
+    )
+  ) %>%
+  dplyr::filter(
+    !is.na(gene_id),
+    gene_id != "",
+    !is.na(transcript_id),
+    transcript_id != ""
+  ) %>%
+  dplyr::transmute(
+    gene_id = gene_id,
+    transcript_id = transcript_id,
+    gene_name = gene_name_final,
+    gene_description = gene_description_final,
+    gene_biotype = gene_biotype
+  ) %>%
+  dplyr::distinct(
+    gene_id,
+    transcript_id,
+    .keep_all = TRUE
+  )
+
+write_csv(
+  gene_transcript_map_clean,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_gene_transcript_map_clean_from_GTF.csv")
+  )
+)
+
+# Match candidate genes to transcript IDs
+# Candidate gene X has transcript Y
+# This is essential because eggNOG will annotate transcript/protein sequences, not the SNPs directly
+
+candidate_gene_transcript_map <- candidate_genes_gene_level %>%
+  dplyr::select(
+    candidate_gene_id,
+    candidate_gene_name
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::left_join(
+    gene_transcript_map_clean,
+    by = c("candidate_gene_id" = "gene_id")
+  ) %>%
+  dplyr::arrange(
+    candidate_gene_id,
+    transcript_id
+  )
+
+write_csv(
+  candidate_gene_transcript_map,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_candidate_gene_transcript_mapping.csv")
+  )
+)
+
+# Create transcript ID list for `eggNOG`
+# This is the input file used by your terminal `eggNOG` script
+# It contains one transcript ID per line
+# This file is used in terminal to extract only the proteins corresponding to candidate genes
+
+candidate_transcript_ids <- candidate_gene_transcript_map %>%
+  dplyr::filter(!is.na(transcript_id)) %>%
+  dplyr::filter(transcript_id != "") %>%
+  dplyr::distinct(transcript_id) %>%
+  dplyr::arrange(transcript_id)
+
+write_tsv(
+  candidate_transcript_ids,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_candidate_transcript_ids.txt")
+  ),
+  col_names = FALSE
+)
+
+# Diagnostics
+candidate_gene_transcript_map %>%
+  dplyr::summarise(
+    n_candidate_genes = dplyr::n_distinct(candidate_gene_id),
+    n_candidate_genes_with_transcript = dplyr::n_distinct(candidate_gene_id[!is.na(transcript_id)]),
+    n_candidate_genes_without_transcript = dplyr::n_distinct(candidate_gene_id[is.na(transcript_id)]),
+    n_candidate_transcripts = dplyr::n_distinct(transcript_id, na.rm = TRUE)
+  )
+
+# Check that the eggNOG input file was created
+file.exists(
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_candidate_transcript_ids.txt")
+  )
+)
+
+```
+
+# 13. Read `eggNOG` output
+
+This reads the main eggNOG output file
+
+It also removes the # from the first column name and standardises all column names
+
+```{r}
+eggnog_file <- file.path(
+  annotation_output_dir,
+  "eggnog_candidate_genes",
+  paste0(species_prefix, "_candidate_genes_eggnog.emapper.annotations")
+)
+
+eggnog_raw <- readr::read_tsv(
+  eggnog_file,
+  comment = "##",
+  show_col_types = FALSE
+)
+
+names(eggnog_raw) <- names(eggnog_raw) %>%
+  stringr::str_remove("^#") %>%
+  janitor::make_clean_names()
+
+eggnog <- eggnog_raw %>%
+  janitor::clean_names()
+
+glimpse(eggnog)
+names(eggnog)
+```
+
+# 14. Check query column
+
+This finds the `eggNOG` column containing the transcript/protein query ID
+
+```{r}
+query_candidates <- c(
+  "query",
+  "query_name",
+  "query_seq",
+  "x_query"
+)
+
+query_col <- query_candidates[query_candidates %in% names(eggnog)][1]
+
+query_col
+
+if (is.na(query_col)) {
+  stop(
+    "Could not identify query column in eggNOG output. Available columns are: ",
+    paste(names(eggnog), collapse = ", ")
+  )
+}
+
+eggnog %>%
+  dplyr::select(dplyr::all_of(query_col)) %>%
+  head()
+```
+
+# 15. Join `eggNOG` to candidate gene-transcript map
+
+```{r}
+eggnog_clean <- eggnog %>%
+  dplyr::rename(
+    eggnog_query = dplyr::all_of(query_col)
+  )
+
+glimpse(eggnog_clean)
+
+# Check whether eggNOG query IDs match your transcript IDs
+
+transcript_eggnog_overlap <- tibble(
+  n_candidate_transcripts = dplyr::n_distinct(candidate_gene_transcript_map$transcript_id, na.rm = TRUE),
+  n_eggnog_queries = dplyr::n_distinct(eggnog_clean$eggnog_query, na.rm = TRUE),
+  n_matching_transcripts = length(intersect(
+    na.omit(candidate_gene_transcript_map$transcript_id),
+    na.omit(eggnog_clean$eggnog_query)
+  ))
+)
+
+transcript_eggnog_overlap
+
+# Join
+# candidate gene → transcript ID → eggNOG annotation
+
+candidate_gene_transcript_eggnog <- candidate_gene_transcript_map %>%
+  dplyr::left_join(
+    eggnog_clean,
+    by = c("transcript_id" = "eggnog_query")
+  )
+
+glimpse(candidate_gene_transcript_eggnog)
+
+write_csv(
+  candidate_gene_transcript_eggnog,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_candidate_gene_transcript_eggnog_annotation.csv")
+  )
+)
+
+# Diagnostic summary
+candidate_gene_transcript_eggnog %>%
+  summarise(
+    n_candidate_genes = n_distinct(candidate_gene_id),
+    n_candidate_transcripts = n_distinct(transcript_id),
+    n_transcripts_with_eggnog_hit = n_distinct(transcript_id[!is.na(seed_ortholog)]),
+    n_transcripts_without_eggnog_hit = n_distinct(transcript_id[is.na(seed_ortholog)])
+  )
+
+```
+
+# 16. Join `eggNOG` to candidate SNP-gene table
+
+This is the SNP-gene table plus functional annotation
+
+```{r}
+eggnog_annotation_columns <- c(
+  "seed_ortholog",
+  "evalue",
+  "score",
+  "egg_nog_ogs",
+  "max_annot_lvl",
+  "cog_category",
+  "description",
+  "preferred_name",
+  "gos",
+  "ec",
+  "kegg_ko",
+  "kegg_pathway",
+  "kegg_module",
+  "kegg_reaction",
+  "kegg_rclass",
+  "brite",
+  "kegg_tc",
+  "cazy",
+  "bigg_reaction",
+  "pfams"
+)
+
+available_eggnog_annotation_columns <- eggnog_annotation_columns[
+  eggnog_annotation_columns %in% names(candidate_gene_transcript_eggnog)
+]
+
+available_eggnog_annotation_columns
+
+# Join eggNOG annotation to the candidate SNP-gene table
+candidate_gene_table_with_eggnog <- candidate_gene_table_full %>%
+  dplyr::left_join(
+    candidate_gene_transcript_eggnog %>%
+      dplyr::select(
+        candidate_gene_id,
+        transcript_id,
+        dplyr::any_of(available_eggnog_annotation_columns)
+      ) %>%
+      dplyr::distinct(),
+    by = "candidate_gene_id"
+  )
+
+glimpse(candidate_gene_table_with_eggnog)
+
+write_csv(
+  candidate_gene_table_with_eggnog,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_candidate_genes_with_eggnog_annotation.csv")
+  )
+)
+
+# Diagonostic
+candidate_gene_table_with_eggnog %>%
+  summarise(
+    n_rows = n(),
+    n_snps = n_distinct(SNP_ID),
+    n_candidate_genes = n_distinct(candidate_gene_id),
+    n_transcripts = n_distinct(transcript_id),
+    n_records_with_eggnog_description = sum(!is.na(description)),
+    n_records_without_eggnog_description = sum(is.na(description))
+  )
+
+```
+
+# 17. Create clean interpretation table
+
+This is the main SNP/gene/transcript-level functional interpretation table
+
+```{r}
+
+# SNP/gene/transcript-level
+interpretation_columns <- c(
+  "SNP_ID",
+  "CHR_original",
+  "CHR",
+  "POS",
+  "n_methods",
+  "overlap_category",
+  "candidate_gene_id",
+  "candidate_gene_name",
+  "candidate_gene_description",
+  "relation_to_gene",
+  "distance_to_gene",
+  "transcript_id",
+  "seed_ortholog",
+  "evalue",
+  "score",
+  "max_annot_lvl",
+  "cog_category",
+  "preferred_name",
+  "description",
+  "gos",
+  "ec",
+  "kegg_ko",
+  "kegg_pathway",
+  "kegg_module",
+  "pfams"
+)
+
+candidate_gene_interpretation_table <- candidate_gene_table_with_eggnog %>%
+  dplyr::select(dplyr::any_of(interpretation_columns)) %>%
+  dplyr::arrange(
+    dplyr::desc(n_methods),
+    relation_to_gene,
+    CHR_original,
+    POS,
+    candidate_gene_id,
+    transcript_id
+  )
+
+candidate_gene_interpretation_table
+
+write_csv(
+  candidate_gene_interpretation_table,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_FINAL_candidate_gene_interpretation_table.csv")
+  )
+)
+
+# Diagnostic
+candidate_gene_interpretation_table %>%
+  summarise(
+    n_records = n(),
+    n_snps = n_distinct(SNP_ID),
+    n_candidate_genes = n_distinct(candidate_gene_id),
+    n_transcripts = n_distinct(transcript_id),
+    n_records_with_eggnog_description = sum(!is.na(description)),
+    n_records_without_eggnog_description = sum(is.na(description)),
+    n_records_with_kegg_ko = sum(!is.na(kegg_ko) & kegg_ko != "-"),
+    n_records_with_kegg_pathway = sum(!is.na(kegg_pathway) & kegg_pathway != "-"),
+    n_records_with_cog = sum(!is.na(cog_category) & cog_category != "-")
+  )
+
+```
+
+# 18. Create gene-level `eggNOG` table
+
+Final table for biological interpretation
+
+```{r}
+
+# One row per candidate gene-transcript annotation
+candidate_gene_eggnog_gene_level <- candidate_gene_interpretation_table %>%
+  dplyr::group_by(
+    candidate_gene_id,
+    candidate_gene_name,
+    candidate_gene_description,
+    transcript_id,
+    preferred_name,
+    description,
+    seed_ortholog,
+    max_annot_lvl,
+    cog_category,
+    ec,
+    kegg_ko,
+    kegg_pathway,
+    kegg_module
+  ) %>%
+  dplyr::summarise(
+    n_outlier_snps = n_distinct(SNP_ID),
+    snps = paste(unique(SNP_ID), collapse = "; "),
+    original_chromosomes = paste(unique(CHR_original), collapse = "; "),
+    positions = paste(unique(POS), collapse = "; "),
+    max_method_support = max(n_methods, na.rm = TRUE),
+    overlap_categories = paste(unique(overlap_category), collapse = "; "),
+    relation_types = paste(unique(relation_to_gene), collapse = "; "),
+    min_distance_to_gene = min(distance_to_gene, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(max_method_support),
+    dplyr::desc(n_outlier_snps),
+    candidate_gene_id,
+    transcript_id
+  )
+
+candidate_gene_eggnog_gene_level
+
+write_csv(
+  candidate_gene_eggnog_gene_level,
+  file.path(
+    annotation_output_dir,
+    paste0(species_prefix, "_FINAL_candidate_gene_eggnog_gene_level_table.csv")
+  )
+)
+
+# Diagnostic
+candidate_gene_eggnog_gene_level %>%
+  summarise(
+    n_rows = n(),
+    n_candidate_genes = n_distinct(candidate_gene_id),
+    n_transcripts = n_distinct(transcript_id),
+    n_genes_with_eggnog_description = n_distinct(candidate_gene_id[!is.na(description)]),
+    n_genes_without_eggnog_description = n_distinct(candidate_gene_id[is.na(description)]),
+    n_genes_with_kegg_ko = n_distinct(candidate_gene_id[!is.na(kegg_ko) & kegg_ko != "-"]),
+    n_genes_with_kegg_pathway = n_distinct(candidate_gene_id[!is.na(kegg_pathway) & kegg_pathway != "-"]),
+    n_genes_with_cog = n_distinct(candidate_gene_id[!is.na(cog_category) & cog_category != "-"])
+  )
+
+```
+
+# 19. Functional annotation plots
+
+## 19.1 Create output directory
+
+```{r}
+functional_plot_dir <- file.path(
+  annotation_output_dir,
+  "functional_annotation_plots"
+)
+
+dir.create(functional_plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+functional_plot_dir
+```
+
+## 19.2 COG dictionary
+
+```{r}
+cog_labels <- c(
+  "A" = "RNA processing and modification",
+  "B" = "Chromatin structure and dynamics",
+  "C" = "Energy production and conversion",
+  "D" = "Cell cycle control, cell division, chromosome partitioning",
+  "E" = "Amino acid transport and metabolism",
+  "F" = "Nucleotide transport and metabolism",
+  "G" = "Carbohydrate transport and metabolism",
+  "H" = "Coenzyme transport and metabolism",
+  "I" = "Lipid transport and metabolism",
+  "J" = "Translation, ribosomal structure and biogenesis",
+  "K" = "Transcription",
+  "L" = "Replication, recombination and repair",
+  "M" = "Cell wall/membrane/envelope biogenesis",
+  "N" = "Cell motility",
+  "O" = "Posttranslational modification, protein turnover, chaperones",
+  "P" = "Inorganic ion transport and metabolism",
+  "Q" = "Secondary metabolites biosynthesis, transport and catabolism",
+  "R" = "General function prediction only",
+  "S" = "Function unknown",
+  "T" = "Signal transduction mechanisms",
+  "U" = "Intracellular trafficking, secretion, and vesicular transport",
+  "V" = "Defense mechanisms",
+  "W" = "Extracellular structures",
+  "Y" = "Nuclear structure",
+  "Z" = "Cytoskeleton"
+)
+
+cog_dictionary <- tibble(
+  cog_category = names(cog_labels),
+  cog_description = unname(cog_labels)
+)
+
+cog_dictionary
+```
+
+## 19.3. COG category summary table
+
+```{r}
+cog_long <- candidate_gene_eggnog_gene_level %>%
+  dplyr::select(
+    candidate_gene_id,
+    candidate_gene_name,
+    preferred_name,
+    description,
+    n_outlier_snps,
+    max_method_support,
+    cog_category
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::filter(
+    !is.na(cog_category),
+    cog_category != "-",
+    cog_category != ""
+  ) %>%
+  dplyr::mutate(
+    cog_category = stringr::str_replace_all(cog_category, "\\s+", "")
+  ) %>%
+  tidyr::separate_rows(cog_category, sep = "") %>%
+  dplyr::filter(cog_category != "") %>%
+  dplyr::left_join(
+    cog_dictionary,
+    by = "cog_category"
+  ) %>%
+  dplyr::mutate(
+    cog_description = dplyr::if_else(
+      is.na(cog_description),
+      paste0("Unmapped COG category: ", cog_category),
+      cog_description
+    ),
+    gene_label = dplyr::case_when(
+      !is.na(candidate_gene_name) & candidate_gene_name != "" ~ candidate_gene_name,
+      !is.na(preferred_name) & preferred_name != "" ~ preferred_name,
+      TRUE ~ candidate_gene_id
+    )
+  )
+
+cog_long
+
+# Summarise COG categories
+cog_summary <- cog_long %>%
+  dplyr::group_by(
+    cog_category,
+    cog_description
+  ) %>%
+  dplyr::summarise(
+    n_candidate_genes = n_distinct(candidate_gene_id),
+    n_transcripts = n_distinct(preferred_name),
+    mean_method_support = mean(max_method_support, na.rm = TRUE),
+    max_method_support = max(max_method_support, na.rm = TRUE),
+    genes = paste(sort(unique(candidate_gene_id)), collapse = "; "),
+    gene_labels = paste(sort(unique(gene_label)), collapse = "; "),
+    descriptions = paste(sort(unique(na.omit(description))), collapse = " | "),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_candidate_genes),
+    cog_category
+  )
+
+cog_summary
+
+write_csv(
+  cog_summary,
+  file.path(
+    functional_plot_dir,
+    paste0(species_prefix, "_COG_category_summary.csv")
+  )
+)
+```
+
+## 19.4. COG bar plot
+
+```{r}
+if (nrow(cog_summary) > 0) {
+  
+  cog_barplot <- cog_summary %>%
+    dplyr::mutate(
+      cog_description_wrapped = stringr::str_wrap(cog_description, width = 45),
+      cog_description_wrapped = forcats::fct_reorder(
+        cog_description_wrapped,
+        n_candidate_genes
+      )
+    ) %>%
+    ggplot(
+      aes(
+        x = n_candidate_genes,
+        y = cog_description_wrapped
+      )
+    ) +
+    geom_col(fill = "grey50") +
+    geom_text(
+      aes(label = n_candidate_genes),
+      hjust = -0.25,
+      size = 3.2
+    ) +
+    scale_x_continuous(
+      expand = expansion(mult = c(0, 0.2)),
+      breaks = scales::pretty_breaks()
+    ) +
+    labs(
+      title = paste0(species_name, " candidate genes: COG functional categories"),
+      subtitle = "Descriptive summary of eggNOG COG annotations",
+      x = "Number of candidate genes",
+      y = "COG category"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text.y = element_text(size = 9),
+      plot.title = element_text(face = "bold")
+    )
+  
+  cog_barplot
+  
+  ggsave(
+    filename = file.path(
+      functional_plot_dir,
+      paste0(species_prefix, "_COG_category_barplot.png")
+    ),
+    plot = cog_barplot,
+    width = 10,
+    height = 7,
+    dpi = 400
+  )
+  
+  ggsave(
+    filename = file.path(
+      functional_plot_dir,
+      paste0(species_prefix, "_COG_category_barplot.pdf")
+    ),
+    plot = cog_barplot,
+    width = 10,
+    height = 7
+  )
+  
+} else {
+  message("No COG annotations available for plotting.")
+}
+```
+
+## 19.5 COG bar plot with gene labels
+
+```{r}
+if (nrow(cog_summary) > 0) {
+  
+  cog_plot_table <- cog_summary %>%
+    dplyr::mutate(
+      cog_description_wrapped = stringr::str_wrap(cog_description, width = 40),
+      gene_labels_wrapped = stringr::str_wrap(gene_labels, width = 45),
+      cog_description_wrapped = forcats::fct_reorder(
+        cog_description_wrapped,
+        n_candidate_genes
+      )
+    )
+  
+  x_max <- max(cog_plot_table$n_candidate_genes, na.rm = TRUE)
+  
+  cog_barplot_with_gene_names <- ggplot(
+    cog_plot_table,
+    aes(
+      x = n_candidate_genes,
+      y = cog_description_wrapped
+    )
+  ) +
+    geom_col(fill = "grey55") +
+    geom_text(
+      aes(label = n_candidate_genes),
+      hjust = -0.2,
+      size = 3
+    ) +
+    geom_text(
+      aes(
+        x = n_candidate_genes + 0.3,
+        label = gene_labels_wrapped
+      ),
+      hjust = 0,
+      size = 2.8
+    ) +
+    scale_x_continuous(
+      breaks = seq(0, x_max + 5, by = 1),
+      limits = c(0, x_max + 5),
+      expand = expansion(mult = c(0, 0))
+    ) +
+    coord_cartesian(clip = "off") +
+    labs(
+      x = "Number of candidate genes",
+      y = "COG function"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank(),
+      plot.title = element_blank(),
+      plot.subtitle = element_blank(),
+      axis.text.y = element_text(size = 9),
+      plot.margin = margin(5.5, 220, 5.5, 5.5)
+    )
+  
+  cog_barplot_with_gene_names
+  
+  ggsave(
+    filename = file.path(
+      functional_plot_dir,
+      paste0(species_prefix, "_COG_barplot_with_gene_names_and_functions.png")
+    ),
+    plot = cog_barplot_with_gene_names,
+    width = 16,
+    height = 8.5,
+    dpi = 400
+  )
+  
+  ggsave(
+    filename = file.path(
+      functional_plot_dir,
+      paste0(species_prefix, "_COG_barplot_with_gene_names_and_functions.pdf")
+    ),
+    plot = cog_barplot_with_gene_names,
+    width = 16,
+    height = 8.5
+  )
+  
+} else {
+  message("No COG annotations available for gene-label plot.")
+}
+```
+
+## 19.6 KEGG pathway summary
+
+```{r}
+kegg_gene_table <- candidate_gene_eggnog_gene_level %>%
+  dplyr::select(
+    candidate_gene_id,
+    candidate_gene_name,
+    preferred_name,
+    description,
+    n_outlier_snps,
+    max_method_support,
+    kegg_pathway
+  ) %>%
+  dplyr::distinct()
+
+kegg_long <- kegg_gene_table %>%
+  dplyr::filter(
+    !is.na(kegg_pathway),
+    kegg_pathway != "-",
+    kegg_pathway != ""
+  ) %>%
+  tidyr::separate_rows(kegg_pathway, sep = ",") %>%
+  dplyr::mutate(
+    kegg_pathway = stringr::str_trim(kegg_pathway)
+  ) %>%
+  dplyr::filter(kegg_pathway != "")
+
+kegg_long
+
+# KEGG diagnostic
+kegg_annotation_diagnostic <- tibble(
+  total_candidate_genes = n_distinct(candidate_gene_eggnog_gene_level$candidate_gene_id),
+  genes_with_kegg_pathway = n_distinct(kegg_long$candidate_gene_id),
+  genes_without_kegg_pathway = total_candidate_genes - genes_with_kegg_pathway,
+  total_kegg_pathway_terms = n_distinct(kegg_long$kegg_pathway)
+)
+
+kegg_annotation_diagnostic
+
+write_csv(
+  kegg_annotation_diagnostic,
+  file.path(
+    functional_plot_dir,
+    paste0(species_prefix, "_KEGG_pathway_annotation_diagnostic.csv")
+  )
+)
+
+# Summarise KEGG pathways
+kegg_summary <- kegg_long %>%
+  dplyr::group_by(kegg_pathway) %>%
+  dplyr::summarise(
+    n_candidate_genes = n_distinct(candidate_gene_id),
+    gene_ratio = n_candidate_genes / n_distinct(kegg_long$candidate_gene_id),
+    mean_method_support = mean(max_method_support, na.rm = TRUE),
+    max_method_support = max(max_method_support, na.rm = TRUE),
+    genes = paste(sort(unique(candidate_gene_id)), collapse = "; "),
+    gene_names = paste(sort(unique(na.omit(candidate_gene_name))), collapse = "; "),
+    preferred_names = paste(sort(unique(na.omit(preferred_name))), collapse = "; "),
+    descriptions = paste(sort(unique(na.omit(description))), collapse = " | "),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_candidate_genes),
+    dplyr::desc(gene_ratio)
+  )
+
+kegg_summary
+
+write_csv(
+  kegg_summary,
+  file.path(
+    functional_plot_dir,
+    paste0(species_prefix, "_KEGG_pathway_summary.csv")
+  )
+)
+
+```
+
+## 19.7 KEGG bubble plot
+
+```{r}
+top_n_pathways <- 20
+
+kegg_summary_top <- kegg_summary %>%
+  dplyr::slice_max(
+    order_by = n_candidate_genes,
+    n = top_n_pathways,
+    with_ties = FALSE
+  ) %>%
+  dplyr::mutate(
+    pathway_label = stringr::str_replace_all(kegg_pathway, "path:", ""),
+    pathway_label = stringr::str_replace_all(pathway_label, "ko:", ""),
+    pathway_label = stringr::str_wrap(pathway_label, width = 45),
+    pathway_label = forcats::fct_reorder(pathway_label, gene_ratio)
+  )
+
+if (nrow(kegg_summary_top) > 0) {
+  
+  kegg_bubble_plot <- ggplot(
+    kegg_summary_top,
+    aes(
+      x = gene_ratio,
+      y = pathway_label,
+      size = n_candidate_genes
+    )
+  ) +
+    geom_point(alpha = 0.9, colour = "grey35") +
+    geom_text(
+      aes(label = n_candidate_genes),
+      hjust = -0.9,
+      size = 3
+    ) +
+    scale_size_continuous(name = "Gene count") +
+    scale_x_continuous(
+      expand = expansion(mult = c(0.02, 0.25))
+    ) +
+    labs(
+      title = paste0(species_name, " candidate genes: KEGG pathway representation"),
+      subtitle = "Descriptive representation among KEGG-annotated candidate genes, not enrichment",
+      x = "Gene ratio",
+      y = "KEGG pathway"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      panel.grid.major.y = element_line(colour = "grey90"),
+      panel.grid.minor = element_blank(),
+      axis.text.y = element_text(size = 9),
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(size = 10)
+    )
+  
+  kegg_bubble_plot
+  
+  ggsave(
+    filename = file.path(
+      functional_plot_dir,
+      paste0(species_prefix, "_KEGG_pathway_bubble_plot.png")
+    ),
+    plot = kegg_bubble_plot,
+    width = 11,
+    height = 8,
+    dpi = 400
+  )
+  
+  ggsave(
+    filename = file.path(
+      functional_plot_dir,
+      paste0(species_prefix, "_KEGG_pathway_bubble_plot.pdf")
+    ),
+    plot = kegg_bubble_plot,
+    width = 11,
+    height = 8
+  )
+  
+} else {
+  message("No KEGG pathway annotations available for plotting.")
+}
+
+```
+
+## 19.8 General KEGG KO/pathway/module representation
+
+```{r}
+required_pathway_cols <- c("kegg_ko", "kegg_pathway", "kegg_module")
+
+if (all(required_pathway_cols %in% names(candidate_gene_eggnog_gene_level))) {
+  
+  pathway_representation_long <- candidate_gene_eggnog_gene_level %>%
+    dplyr::select(
+      candidate_gene_id,
+      candidate_gene_name,
+      n_outlier_snps,
+      max_method_support,
+      kegg_ko,
+      kegg_pathway,
+      kegg_module
+    ) %>%
+    dplyr::distinct() %>%
+    tidyr::pivot_longer(
+      cols = c(kegg_ko, kegg_pathway, kegg_module),
+      names_to = "annotation_type",
+      values_to = "annotation_term"
+    ) %>%
+    dplyr::filter(
+      !is.na(annotation_term),
+      annotation_term != "-",
+      annotation_term != ""
+    ) %>%
+    tidyr::separate_rows(annotation_term, sep = ",") %>%
+    dplyr::mutate(
+      annotation_term = stringr::str_trim(annotation_term),
+      annotation_type = dplyr::recode(
+        annotation_type,
+        "kegg_ko" = "KEGG KO",
+        "kegg_pathway" = "KEGG pathway",
+        "kegg_module" = "KEGG module"
+      )
+    ) %>%
+    dplyr::filter(annotation_term != "")
+  
+  pathway_representation_summary <- pathway_representation_long %>%
+    dplyr::group_by(annotation_type, annotation_term) %>%
+    dplyr::summarise(
+      n_candidate_genes = n_distinct(candidate_gene_id),
+      gene_ratio = n_candidate_genes / n_distinct(candidate_gene_eggnog_gene_level$candidate_gene_id),
+      mean_method_support = mean(max_method_support, na.rm = TRUE),
+      mean_outlier_snps = mean(n_outlier_snps, na.rm = TRUE),
+      genes = paste(unique(candidate_gene_id), collapse = "; "),
+      gene_names = paste(unique(na.omit(candidate_gene_name)), collapse = "; "),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(
+      annotation_type,
+      dplyr::desc(n_candidate_genes),
+      dplyr::desc(gene_ratio)
+    )
+  
+  pathway_representation_summary
+  
+  write_csv(
+    pathway_representation_summary,
+    file.path(
+      functional_plot_dir,
+      paste0(species_prefix, "_pathway_representation_summary.csv")
+    )
+  )
+  
+  top_n_per_type <- 10
+  
+  pathway_representation_top <- pathway_representation_summary %>%
+    dplyr::group_by(annotation_type) %>%
+    dplyr::slice_max(
+      order_by = n_candidate_genes,
+      n = top_n_per_type,
+      with_ties = FALSE
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      annotation_term = stringr::str_replace_all(annotation_term, "path:", ""),
+      annotation_term = stringr::str_replace_all(annotation_term, "ko:", ""),
+      annotation_term = stringr::str_replace_all(annotation_term, "md:", ""),
+      annotation_term = stringr::str_wrap(annotation_term, width = 45),
+      annotation_term = forcats::fct_reorder(annotation_term, gene_ratio)
+    )
+  
+  if (nrow(pathway_representation_top) > 0) {
+    
+    pathway_representation_bubble_plot <- ggplot(
+      pathway_representation_top,
+      aes(
+        x = gene_ratio,
+        y = annotation_term,
+        size = n_candidate_genes,
+        colour = mean_method_support
+      )
+    ) +
+      geom_point(alpha = 0.9) +
+      facet_grid(
+        annotation_type ~ .,
+        scales = "free_y",
+        space = "free_y"
+      ) +
+      scale_size_continuous(name = "Gene count") +
+      scale_colour_gradient(
+        low = "steelblue",
+        high = "red3",
+        name = "Mean method support"
+      ) +
+      labs(
+        title = paste0(species_name, " candidate genes: functional representation"),
+        subtitle = "KEGG KO, pathway, and module representation",
+        x = "Gene ratio",
+        y = "Annotation term"
+      ) +
+      theme_bw(base_size = 12) +
+      theme(
+        panel.grid.major.y = element_line(colour = "grey90"),
+        panel.grid.minor = element_blank(),
+        strip.text.y = element_text(face = "bold"),
+        axis.text.y = element_text(size = 9),
+        plot.title = element_text(face = "bold")
+      )
+    
+    pathway_representation_bubble_plot
+    
+    ggsave(
+      filename = file.path(
+        functional_plot_dir,
+        paste0(species_prefix, "_pathway_representation_bubble_plot.png")
+      ),
+      plot = pathway_representation_bubble_plot,
+      width = 11,
+      height = 10,
+      dpi = 400
+    )
+    
+    ggsave(
+      filename = file.path(
+        functional_plot_dir,
+        paste0(species_prefix, "_pathway_representation_bubble_plot.pdf")
+      ),
+      plot = pathway_representation_bubble_plot,
+      width = 11,
+      height = 10
+    )
+    
+  } else {
+    message("No KEGG KO/pathway/module annotations available for plotting.")
+  }
+  
+} else {
+  message("One or more KEGG columns are missing. Skipping pathway representation bubble plot.")
+}
+
+```
+
+# 20. INFO
+
+Main final files:
+
+AND_FINAL_candidate_gene_interpretation_table.csv ( SNP/gene/transcript-level interpretation)
+
+AND_FINAL_candidate_gene_eggnog_gene_level_table.csv (main biological interpretation of candidate genes)
+
+AND_COG_category_summary.csv (summarise broad functional categories)
+
+AND_KEGG_pathway_summary.csv (summarise KEGG pathway representation)
+
+AND_pathway_representation_summary.csv (summarise KEGG KO, KEGG pathway, and KEGG module annotations together)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
