@@ -1,0 +1,2162 @@
+---
+title: "SSF_LoA_SumStats"
+format:
+  html:
+    theme: flatly
+    grid:
+      margin-width: 100px
+    toc: true
+    toc-float: true
+    toc-location: left-body
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-overflow: wrap
+    self-contained: true
+    code-tools:
+      source: true
+      toggle: false
+      caption: none
+execute:
+  warning: false
+  cache: true
+---
+
+---
+
+**Diversity and differentiation statistics for the *A. flavipes* + *B. terretsris* + *L. malachurum* RADseq datasets using the `snpR` package**
+
+Two datasets were analyzed: the *Full Dataset* containing all SNPs, and the *Neutral Dataset*, where SNPs under the putative effect of selection were removed (based on BayPass v.3 results).  
+
+Figures and tables in `png` format [here](2_results/).
+
+---
+
+# Setup 
+
+## Install and load packages
+
+```{r}
+install.packages("remotes")
+remotes::install_github("hemstrow/snpR")
+
+devtools::install_github("vmikk/metagMisc")
+
+library(devtools)
+library(tidyverse)
+library(vcfR)
+library(snpR)
+library(ade4)
+library(plotly)
+library(gt)
+library(metagMisc)
+```
+
+## Source functions
+
+```{r}
+source("calc_snpR_gendiv.R")
+```
+
+# **ANDRENA FLAVIPES**
+
+# Read and format input data
+
+## Read VCF datasets with package `vcfR`
+
+```{r}
+# Full dataset
+AND_full_vcf <-
+  read.vcfR(
+    "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/AND_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.vcf.gz"
+  )
+
+# Neutral dataset
+#qro_qil_neutral_vcf <-
+  #read.vcfR(
+    #"0_input/QRO_ipr_v2_2_mm80_minmaxdp10100_bi_center_putative_neutral_SNPs.vcf.gz"
+  #)
+```
+
+## Input the metadata file
+
+```{r}
+# read CSV with metadata
+AND_metadata <- read_csv("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/00_sampling_metadata/AND_metadata_complete.csv") %>%
+  rename(
+    Sample = sample,
+    Landscape_Level_1 = landscape_level_1,
+    Landscape_Level_2 = landscape_level_2,
+    SamplingLocation = location,
+    Latitude = LAT,
+    Longitude = LONG
+  )
+
+# calculate mean coordinates for each sampling location
+AND_coords_summary <- AND_metadata %>%
+  group_by(SamplingLocation) %>%
+  summarise(
+    MeanLatitude = mean(Latitude),
+    MeanLongitude = mean(Longitude),
+    .groups = "drop"
+  )
+
+# join mean coordinates back to main data
+AND_metadata <- AND_metadata %>%
+  left_join(AND_coords_summary, by = "SamplingLocation")  %>%
+  select(Sample, Landscape_Level_1, Landscape_Level_2, SamplingLocation, MeanLatitude, MeanLongitude)  %>%
+  distinct()
+```
+
+```{r}
+#| echo: False
+rmarkdown::paged_table(AND_metadata)
+```
+
+## Convert datasets from `vcfR` to `snpR` 
+
+Use the function `snpR::convert_vcfR`, adding the genetic population information
+
+```{r}
+# Full dataset
+AND_full_snpR <-
+  convert_vcfR(
+    AND_full_vcf,
+    sample.meta = AND_metadata
+  )
+
+# Neutral dataset
+qro_qil_neutral_snpR <-
+  convert_vcfR(
+    qro_qil_neutral_vcf,
+    sample.meta = popfile
+  )
+```
+
+### Check general dataset information
+
+```{r}
+nsnps(AND_full_snpR)
+nsamps(AND_full_snpR)
+
+nsnps(qro_qil_neutral_snpR)
+nsamps(qro_qil_neutral_snpR)
+```
+
+```{r}
+summarize_facets(AND_full_snpR)
+summarize_facets(AND_full_snpR, "Landscape_Level_1")
+summarize_facets(AND_full_snpR, "Landscape_Level_2")
+summarize_facets(AND_full_snpR, "SamplingLocation")
+
+summarize_facets(qro_qil_neutral_snpR)
+summarize_facets(qro_qil_neutral_snpR, "Species")
+summarize_facets(qro_qil_neutral_snpR, "GeneticPopulation")
+summarize_facets(qro_qil_neutral_snpR, "SamplingLocation")
+```
+
+# PCA
+
+## Run PCA
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+AND_full_pca <-
+  plot_clusters(
+    AND_full_snpR,
+    facets = "Landscape_Level_1.SamplingLocation",
+    alt.palette = viridisLite::turbo(13)
+  )
+
+qro_qil_neutral_pca <-
+  plot_clusters(
+    qro_qil_neutral_snpR,
+    facets = "GeneticPopulation.SamplingLocation",
+    alt.palette = viridisLite::turbo(18)
+  )
+```
+
+## Plot PCA
+
+```{r}
+# Full Dataset
+AND_full_pca$plots$pca |> ggplotly()
+
+# Neutral Dataset
+qro_qil_neutral_pca$plots$pca |> ggplotly()
+```
+
+# Calculate SnpR Stats
+
+## Calculate summary statistics
+
+```{r}
+#| cache-lazy: false
+AND_full_snpR <-
+  calc_snpR_gendiv(
+    AND_full_snpR,
+    c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation")
+  )
+
+get.snpR.stats(AND_full_snpR)
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_snpR_gendiv(
+    qro_qil_neutral_snpR,
+    c("Species", "GeneticPopulation", "SamplingLocation")
+  )
+```
+
+## Calculate Isolation-by-Distance
+
+```{r}
+#| cache-lazy: false
+AND_full_snpR <-
+  calc_isolation_by_distance(
+    AND_full_snpR,
+    x_y = c("MeanLongitude", "MeanLatitude"),
+    facets = "SamplingLocation",
+    nrepet = 9999
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_isolation_by_distance(
+    qro_qil_neutral_snpR,
+    x_y = c("MeanLongitude", "MeanLatitude"),
+    facets = "SamplingLocation",
+    nrepet = 9999
+  )
+```
+
+## Calculate Genetic Distances
+
+```{r}
+#| cache-lazy: false
+AND_full_snpR <-
+  calc_genetic_distances(
+    AND_full_snpR,
+    facets = "SamplingLocation"
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_genetic_distances(
+    qro_qil_neutral_snpR,
+    facets = "SamplingLocation"
+  )
+```
+
+# Analyze Results
+
+## Genetic Diversity
+
+Retrieve genetic diversity statistics.
+
+```{r}
+#| cache-lazy: false
+AND_full_snpR_gendiv <-
+  get.snpR.stats(
+    AND_full_snpR,
+    facets = c("Landscape_Level_1",  "Landscape_Level_2", "SamplingLocation"),
+    stats = c(
+      "ho", "he", "hwe", "pi", "private", "seg_sites", "prop_poly", "hs",
+      "allelic_richness", "fis"
+    )
+  )
+
+```
+
+```{r}
+qro_qil_neutral_snpR_gendiv <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR,
+    facets = c("GeneticPopulation", "SamplingLocation", "Species"),
+    stats = c(
+      "ho", "he", "hwe", "pi", "private", "seg_sites", "prop_poly", "hs",
+      "allelic_richness", "fis"
+    )
+  )
+```
+
+Genetic diversity statistics for both datasets are represented in the following tables:
+
+::: {.panel-tabset}
+
+### Landscape_Level_1
+
+```{r}
+#| code-fold: true
+AND_gendiv_genpop_gt <- 
+  bind_rows(
+    AND_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "Landscape_Level_1")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *Genetic Population*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+AND_gendiv_genpop_gt
+
+gtsave(AND_gendiv_genpop_gt, "01_results/AND/AND_gendiv_genpop_table_SSF_LoA.docx")
+```
+
+### Landscape_Level_2
+
+```{r}
+#| code-fold: true
+AND_gendiv_genpop_2_gt <- 
+  bind_rows(
+    AND_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "Landscape_Level_2")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *Landscape Level 2*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+AND_gendiv_genpop_2_gt
+
+gtsave(AND_gendiv_genpop_2_gt, "01_results/AND/AND_gendiv_genpop_2_table_SSF_LoA_N_LoA_F.docx")
+```
+
+### Sampling Location
+
+```{r}
+#| code-fold: true
+AND_gendiv_genpop_sampling_gt <- 
+  bind_rows(
+    AND_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "SamplingLocation")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *SamplingLocation*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+AND_gendiv_genpop_sampling_gt
+
+gtsave(AND_gendiv_genpop_sampling_gt, "01_results/AND/AND_gendiv_genpop_sampling_table.docx")
+```
+:::
+
+## Differentiation
+
+Retrieve pairwise-Fst stats for both datasets.
+
+```{r}
+#| cache-lazy: false
+#| 
+# Compute FST statistics
+AND_full_snpR <- calc_pairwise_fst(
+  AND_full_snpR,
+  facets = c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation")
+)
+
+AND_full_snpR_pwfst <-
+  get.snpR.stats(
+    AND_full_snpR,
+    facets = c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation"),
+    stats = "fst"
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR_pwfst <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR,
+    facets = c("Species", "GeneticPopulation", "SamplingLocation"),
+    stats = "fst"
+  )
+```
+
+Plot pairwise-Fst between species, genetic populations, and sampling locations, for both datasets.
+
+::: {.panel-tabset}
+
+### Landscape_Level_1
+
+```{r}
+#| code-fold: true
+AND_full_snpR_pwfst[["fst.matrix"]][["Landscape_Level_1"]]  %>%
+  gt(rowname_col = "p1")  %>%
+  tab_header(
+    title = md("Pairwise-Fst - *Full Dataset*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 5
+  )
+
+qro_qil_neutral_snpR_pwfst[["fst.matrix"]][["GeneticPopulation"]] |>
+  gt(rowname_col = "p1") |>
+  tab_header(
+    title = md("Pairwise-Fst - *Neutral Datase*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  )
+```
+
+### Landscape_Level_2
+
+```{r}
+#| code-fold: true
+AND_full_snpR_pwfst[["fst.matrix"]][["Landscape_Level_2"]]  %>%
+  gt(rowname_col = "p1")  %>%
+  tab_header(
+    title = md("Pairwise-Fst - *Full Dataset*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 5
+  )
+
+qro_qil_neutral_snpR_pwfst[["fst.matrix"]][["GeneticPopulation"]] |>
+  gt(rowname_col = "p1") |>
+  tab_header(
+    title = md("Pairwise-Fst - *Neutral Datase*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  )
+```
+
+### Sampling Location
+
+```{r}
+#| code-fold: true
+#| fig-width: 20
+#| fig-height: 9
+# Full Dataset
+plot_pairwise_fst_heatmap(
+  AND_full_snpR,
+  facets = "SamplingLocation"
+  )
+
+ggsave("01_results/AND/AND_pairwisefst_heatmap_full_dataset.png", width = 20, height = 10)
+
+# Neutral Dataset
+plot_pairwise_fst_heatmap(
+  qro_qil_neutral_snpR,
+  facets = "SamplingLocation"
+  )
+
+ggsave("2_results/qro_qil_pairwisefst_heatmap_neutral_dataset.png", width = 20, height = 20)
+```
+
+:::
+
+## Isolation by Distance
+
+### Extract IBD results
+
+```{r}
+#| cache-lazy: false
+AND_full_IBD <- 
+  get.snpR.stats(
+  AND_full_snpR,
+  "SamplingLocation",
+  "ibd"
+  )
+  
+qro_qil_neutral_IBD <- 
+  get.snpR.stats(
+  qro_qil_neutral_snpR,
+  "SamplingLocation",
+  "ibd"
+  )
+```
+
+### Check Mantel Test results
+
+```{r}
+# Full Dataset
+AND_full_IBD
+plot(AND_full_IBD[["SamplingLocation"]][[".base"]][["Edwards"]])
+  
+# Neutral Dataset  
+qro_qil_neutral_IBD
+plot(qro_qil_neutral_IBD[["SamplingLocation"]][[".base"]][["Edwards"]])
+```
+
+### Extract Genetic Distances
+
+```{r}
+AND_full_GD <-
+  get.snpR.stats(
+   AND_full_snpR, 
+    facets = "SamplingLocation",
+    stats = "genetic_distance"
+  )
+  
+qro_qil_neutral_GD <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR, 
+    facets = "SamplingLocation",
+    stats = "genetic_distance"
+  )
+```
+
+### Extract Geographical Distances
+
+```{r}
+AND_full_GEO <-
+  get.snpR.stats(
+    AND_full_snpR, 
+    facets = "SamplingLocation",
+    stats = "geo_dist"
+  )
+  
+qro_qil_neutral_GEO <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR, 
+    facets = "SamplingLocation",
+    stats = "geo_dist"
+  )
+```
+
+### Plot Genetic x Geographical Distance
+
+```{r}
+  #| code-fold: true
+
+mantel_r <- -0.52
+mantel_p <- 0.98
+
+mantel_label <- paste0(
+  "Mantel r = ", mantel_r, "\n",
+  "p = ", mantel_p
+)
+
+p_ibd <- left_join(
+  metagMisc::dist2list(AND_full_GD$SamplingLocation$.base$Edwards),
+  metagMisc::dist2list(AND_full_GEO$SamplingLocation$Edwards),
+  by = c("col", "row"),
+  suffix = c(".GD", ".GEO")
+) %>%
+  ggplot(aes(x = value.GEO, y = value.GD)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("Geographical Distance") +
+  ylab("Genetic Distance (Edwards)") +
+  theme_minimal() +
+  annotate(
+    "text",
+    x = Inf, y = Inf,
+    label = mantel_label,
+    hjust = 1.1, vjust = 1.2,
+    size = 4
+  )
+
+ggsave("01_results/AND/AND_ibd_full_dataset.png", bg = "white")
+  
+left_join(
+  metagMisc::dist2list(qro_qil_neutral_GD$SamplingLocation$.base$Edwards),
+  metagMisc::dist2list(qro_qil_neutral_GEO$SamplingLocation$Edwards),
+  by = c("col", "row"), 
+  suffix = c(".GD", ".GEO") 
+  ) |> 
+  ggplot(
+    aes(x = value.GEO, y = value.GD)
+  ) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("Geographical Distance") +
+  ylab("Genetic Distance (Edwards)") +
+  #ggtitle("Isolation by Distance - Neutral Dataset") +
+  theme_minimal()
+
+ggsave("2_results/qro_qil_ibd_neutral_dataset.png", bg = "white")
+```
+
+# Citations
+
+```{r}
+citations(AND_full_snpR)
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+# TESTE INPUT ALELOS PRIVADOS
+
+```{r}
+library(dplyr)
+library(tibble)
+
+extract_private_snps_with_both_AF <- function(vcf,
+                                              metadata,
+                                              group_col,
+                                              sample_col = "Sample",
+                                              min_called = 5,
+                                              min_alt_count = 2) {
+
+  # Match samples
+  vcf_samples <- colnames(vcf@gt)[-1]
+  meta <- metadata %>%
+    select(all_of(sample_col), all_of(group_col)) %>%
+    filter(.data[[sample_col]] %in% vcf_samples)
+
+  fix <- as.data.frame(vcf@fix, stringsAsFactors = FALSE) %>%
+    transmute(
+      SNP = paste0(CHROM, ":", POS),
+      CHROM, POS, ID, REF, ALT
+    )
+
+  # Extract genotypes
+  GT <- extract.gt(vcf, element = "GT", as.numeric = FALSE)
+  GT <- GT[, meta[[sample_col]], drop = FALSE]
+
+  # Convert to ALT count
+  gt_to_altcount <- function(x) {
+    x <- sub(":.*$", "", x)
+    x[x %in% c(".", "./.", ".|.")] <- NA
+    out <- rep(NA_integer_, length(x))
+    out[x %in% c("0/0","0|0")] <- 0L
+    out[x %in% c("0/1","1/0","0|1","1|0")] <- 1L
+    out[x %in% c("1/1","1|1")] <- 2L
+    out
+  }
+
+  alt_mat <- apply(GT, 2, gt_to_altcount)
+  alt_mat <- as.matrix(alt_mat)
+  rownames(alt_mat) <- fix$SNP
+
+  group_samples <- split(meta[[sample_col]], meta[[group_col]])
+  groups <- names(group_samples)
+
+  # Calculate AF per group
+  af_list <- list()
+  alt_sum_list <- list()
+
+  for (g in groups) {
+    mat_g <- alt_mat[, group_samples[[g]], drop = FALSE]
+    n_called <- rowSums(!is.na(mat_g))
+    alt_sum  <- rowSums(mat_g, na.rm = TRUE)
+    af_alt   <- ifelse(n_called > 0, alt_sum / (2 * n_called), NA_real_)
+
+    af_list[[g]] <- af_alt
+    alt_sum_list[[g]] <- alt_sum
+  }
+
+  # Identify private ALT SNPs
+  private_df <- list()
+
+  for (g in groups) {
+    other_g <- setdiff(groups, g)
+
+    idx <- which(
+      alt_sum_list[[g]] >= min_alt_count &
+      rowSums(sapply(other_g, function(o) alt_sum_list[[o]])) == 0
+    )
+
+    if (length(idx) > 0) {
+      private_df[[g]] <- data.frame(
+        SNP = names(af_list[[g]])[idx],
+        private_in = g,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+
+  private_df <- bind_rows(private_df)
+
+  # Build AF table for both groups
+  af_table <- data.frame(
+    SNP = rownames(alt_mat),
+    AF_LoA = af_list[["LoA"]],
+    AF_SSF = af_list[["SSF"]]
+  )
+
+  # Merge
+  final_table <- private_df %>%
+    left_join(af_table, by = "SNP") %>%
+    left_join(fix, by = "SNP")
+
+  return(final_table)
+}
+
+AND_private_compare <- extract_private_snps_with_both_AF(
+  vcf = AND_full_vcf,
+  metadata = AND_metadata,
+  group_col = "Landscape_Level_1",
+  sample_col = "Sample",
+  min_called = 5,
+  min_alt_count = 2
+)
+
+head(AND_private_compare)
+
+#write.csv(
+ #AND_private_compare,
+  #"01_results/AND/AND_private_SNPs_with_AF_LoA_vs_SSF.csv",
+  #row.names = FALSE
+#)
+
+library(dplyr)
+library(ggplot2)
+
+AND_private_compare2 <- AND_private_compare %>%
+  mutate(
+    AF_private = ifelse(private_in == "LoA", AF_LoA, AF_SSF)
+  )
+
+# Histogram (per group)
+ggplot(AND_private_compare2, aes(x = AF_private)) +
+  geom_histogram(bins = 40) +
+  facet_wrap(~private_in, scales = "free_y") +
+  xlab("Private allele frequency (within private group)") +
+  ylab("Count") +
+  theme_minimal()
+
+# Density (per group)
+ggplot(AND_private_compare2, aes(x = AF_private, fill = private_in)) +
+  geom_density(alpha = 0.4) +
+  xlab("Private allele frequency (within private group)") +
+  ylab("Density") +
+  theme_minimal()
+
+ggplot(AND_private_compare2, aes(x = AF_private, colour = private_in)) +
+  geom_density() +
+  xlab("Private allele frequency (within private group)") +
+  ylab("Density") +
+  theme_minimal()
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# AND_private_compare is your table with SNP, private_in, AF_LoA, AF_SSF
+
+af_long <- AND_private_compare %>%
+  pivot_longer(
+    cols = c(AF_LoA, AF_SSF),
+    names_to = "landscape",
+    values_to = "AF"
+  ) %>%
+  mutate(
+    landscape = recode(landscape, AF_LoA = "LoA", AF_SSF = "SSF")
+  )
+
+top_n <- 20
+
+top_snps <- AND_private_compare %>%
+  mutate(AF_private = ifelse(private_in == "LoA", AF_LoA, AF_SSF)) %>%
+  arrange(desc(AF_private)) %>%
+  slice_head(n = top_n) %>%
+  pull(SNP)
+
+af_long_top <- af_long %>% filter(SNP %in% top_snps)
+
+ggplot(af_long_top, aes(x = reorder(SNP, AF, FUN = max), y = AF, fill = landscape)) +
+  geom_col(position = "dodge", width = 0.8) +
+  coord_flip() +
+  labs(
+    x = "SNP",
+    y = "Allele frequency (ALT)",
+    fill = "Landscape"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(scales)
+
+top_n <- 50
+
+# 1) Pick top 50 private SNPs within each group (by AF in the private group)
+top_snps_each <- AND_private_compare %>%
+  mutate(AF_private = ifelse(private_in == "LoA", AF_LoA, AF_SSF)) %>%
+  group_by(private_in) %>%
+  slice_max(AF_private, n = top_n, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(SNP, private_in)
+
+# 2) Build long table with both AFs, keep private_in, and order SNPs by CHR and POS within each panel
+af_long_top <- AND_private_compare %>%
+  inner_join(top_snps_each, by = c("SNP", "private_in")) %>%
+  pivot_longer(
+    cols = c(AF_LoA, AF_SSF),
+    names_to = "landscape",
+    values_to = "AF"
+  ) %>%
+  mutate(
+    landscape = recode(landscape, AF_LoA = "LoA", AF_SSF = "SSF"),
+    chr_num = as.numeric(str_remove(str_extract(SNP, "CHR[0-9]+"), "CHR")),
+    pos_num = as.numeric(str_extract(SNP, "(?<=:)[0-9]+"))
+  ) %>%
+  arrange(private_in, chr_num, pos_num) %>%
+  group_by(private_in) %>%
+  mutate(SNP_ord = factor(SNP, levels = unique(SNP))) %>%
+  ungroup()
+
+# 3) Plot: two panels, top 50 each, more specific y scale
+ggplot(af_long_top, aes(x = SNP_ord, y = AF, fill = landscape)) +
+  geom_col(position = "dodge", width = 0.85) +
+  facet_wrap(~private_in, scales = "free_x", ncol = 1) +
+  scale_y_continuous(
+    breaks = pretty_breaks(n = 8),
+    labels = number_format(accuracy = 0.01),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    x = "SNP (ordered by chromosome and position)",
+    y = "Allele frequency (ALT)",
+    fill = "Landscape"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# **BOMBUS TERRESTRIS**
+
+# Read and format input data
+
+## Read VCF datasets with package `vcfR`
+
+```{r}
+# Full dataset
+BOM_full_vcf <-
+  read.vcfR(
+    "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/BOM_stk_rm_kinship_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.vcf.gz"
+  )
+
+# Neutral dataset
+qro_qil_neutral_vcf <-
+  read.vcfR(
+    "0_input/QRO_ipr_v2_2_mm80_minmaxdp10100_bi_center_putative_neutral_SNPs.vcf.gz"
+  )
+```
+
+## Input the metadata file
+
+```{r}
+# read CSV with metadata
+BOM_metadata <- read_csv("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/00_sampling_metadata/BOM_metadata_complete.csv") %>%
+  rename(
+    Sample = sample,
+    Landscape_Level_1 = landscape_level_1,
+    Landscape_Level_2 = landscape_level_2,
+    SamplingLocation = location,
+    Latitude = LAT,
+    Longitude = LONG
+  )
+
+# calculate mean coordinates for each sampling location
+BOM_coords_summary <- BOM_metadata %>%
+  group_by(SamplingLocation) %>%
+  summarise(
+    MeanLatitude = mean(Latitude),
+    MeanLongitude = mean(Longitude),
+    .groups = "drop"
+  )
+
+# join mean coordinates back to main data
+BOM_metadata <- BOM_metadata %>%
+  left_join(BOM_coords_summary, by = "SamplingLocation")  %>%
+  select(Sample, Landscape_Level_1, Landscape_Level_2, SamplingLocation, MeanLatitude, MeanLongitude)  %>%
+  distinct()
+```
+
+```{r}
+#| echo: False
+rmarkdown::paged_table(BOM_metadata)
+```
+
+## Convert datasets from `vcfR` to `snpR` 
+
+Use the function `snpR::convert_vcfR`, adding the genetic population information
+
+```{r}
+# Full dataset
+BOM_full_snpR <-
+  convert_vcfR(
+    BOM_full_vcf,
+    sample.meta = BOM_metadata
+  )
+
+# Neutral dataset
+qro_qil_neutral_snpR <-
+  convert_vcfR(
+    qro_qil_neutral_vcf,
+    sample.meta = popfile
+  )
+```
+
+### Check general dataset information
+
+```{r}
+nsnps(BOM_full_snpR)
+nsamps(BOM_full_snpR)
+
+nsnps(qro_qil_neutral_snpR)
+nsamps(qro_qil_neutral_snpR)
+```
+
+```{r}
+summarize_facets(BOM_full_snpR)
+summarize_facets(BOM_full_snpR, "Landscape_Level_1")
+summarize_facets(BOM_full_snpR, "Landscape_Level_2")
+summarize_facets(BOM_full_snpR, "SamplingLocation")
+
+summarize_facets(qro_qil_neutral_snpR)
+summarize_facets(qro_qil_neutral_snpR, "Species")
+summarize_facets(qro_qil_neutral_snpR, "GeneticPopulation")
+summarize_facets(qro_qil_neutral_snpR, "SamplingLocation")
+```
+
+# PCA
+
+## Run PCA
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+BOM_full_pca <-
+  plot_clusters(
+    BOM_full_snpR,
+    facets = "Landscape_Level_1.SamplingLocation",
+    alt.palette = viridisLite::turbo(13)
+  )
+
+qro_qil_neutral_pca <-
+  plot_clusters(
+    qro_qil_neutral_snpR,
+    facets = "GeneticPopulation.SamplingLocation",
+    alt.palette = viridisLite::turbo(18)
+  )
+```
+
+## Plot PCA
+
+```{r}
+# Full Dataset
+BOM_full_pca$plots$pca |> ggplotly()
+
+# Neutral Dataset
+qro_qil_neutral_pca$plots$pca |> ggplotly()
+```
+
+# Calculate SnpR Stats
+
+## Calculate summary statistics
+
+```{r}
+#| cache-lazy: false
+
+BOM_full_snpR <-
+  calc_snpR_gendiv(
+    BOM_full_snpR,
+    c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation")
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_snpR_gendiv(
+    qro_qil_neutral_snpR,
+    c("Species", "GeneticPopulation", "SamplingLocation")
+  )
+```
+
+## Calculate Isolation-by-Distance
+
+```{r}
+#| cache-lazy: false
+BOM_full_snpR <-
+  calc_isolation_by_distance(
+    BOM_full_snpR,
+    x_y = c("MeanLongitude", "MeanLatitude"),
+    facets = "SamplingLocation",
+    nrepet = 9999
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_isolation_by_distance(
+    qro_qil_neutral_snpR,
+    x_y = c("MeanLongitude", "MeanLatitude"),
+    facets = "SamplingLocation",
+    nrepet = 9999
+  )
+```
+
+## Calculate Genetic Distances
+
+```{r}
+#| cache-lazy: false
+BOM_full_snpR <-
+  calc_genetic_distances(
+    BOM_full_snpR,
+    facets = "SamplingLocation"
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_genetic_distances(
+    qro_qil_neutral_snpR,
+    facets = "SamplingLocation"
+  )
+```
+
+# Analyze Results
+
+## Genetic Diversity
+
+Retrieve genetic diversity statistics.
+
+```{r}
+#| cache-lazy: false
+BOM_full_snpR_gendiv <-
+  get.snpR.stats(
+    BOM_full_snpR,
+    facets = c("Landscape_Level_1",  "Landscape_Level_2", "SamplingLocation"),
+    stats = c(
+      "ho", "he", "pi", "private", "seg_sites", "prop_poly", "hs",
+      "allelic_richness", "fis"
+    )
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR_gendiv <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR,
+    facets = c("GeneticPopulation", "SamplingLocation", "Species"),
+    stats = c(
+      "ho", "he", "hwe", "pi", "private", "seg_sites", "prop_poly", "hs",
+      "allelic_richness", "fis"
+    )
+  )
+```
+
+Genetic diversity statistics for both datasets are represented in the following tables:
+
+::: {.panel-tabset}
+
+### Landscape_Level_1
+
+```{r}
+#| code-fold: true
+BOM_gendiv_genpop_gt <- 
+  bind_rows(
+    BOM_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "Landscape_Level_1")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *Landscape_Level_1*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+BOM_gendiv_genpop_gt
+
+gtsave(BOM_gendiv_genpop_gt, "01_results/BOM/BOM_gendiv_genpop_table_SSF_LoA.docx")
+```
+
+### Landscape_Level_2
+
+```{r}
+#| code-fold: true
+BOM_gendiv_genpop_2_gt <- 
+  bind_rows(
+    BOM_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "Landscape_Level_2")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *Landscape Level 2*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+BOM_gendiv_genpop_2_gt
+
+gtsave(BOM_gendiv_genpop_2_gt, "01_results/BOM/BOM_gendiv_genpop_2_table_SSF_LoA_N_LoA_F.docx")
+```
+
+### Sampling Location
+
+```{r}
+#| code-fold: true
+BOM_gendiv_genpop_sampling_gt <- 
+  bind_rows(
+    BOM_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "SamplingLocation")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *SamplingLocation*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+BOM_gendiv_genpop_sampling_gt
+
+gtsave(BOM_gendiv_genpop_sampling_gt, "01_results/BOM/BOM_gendiv_genpop_sampling_table.docx")
+```
+:::
+
+## Differentiation
+
+Retrieve pairwise-Fst stats for both datasets.
+
+```{r}
+#| cache-lazy: false
+#| 
+# Compute FST statistics
+BOM_full_snpR <- calc_pairwise_fst(
+  BOM_full_snpR,
+  facets = c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation")
+)
+
+BOM_full_snpR_pwfst <-
+  get.snpR.stats(
+    BOM_full_snpR,
+    facets = c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation"),
+    stats = "fst"
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR_pwfst <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR,
+    facets = c("Species", "GeneticPopulation", "SamplingLocation"),
+    stats = "fst"
+  )
+```
+
+Plot pairwise-Fst between species, genetic populations, and sampling locations, for both datasets.
+
+::: {.panel-tabset}
+
+### Landscape_Level_1
+
+```{r}
+#| code-fold: true
+BOM_full_snpR_pwfst[["fst.matrix"]][["Landscape_Level_1"]]  %>%
+  gt(rowname_col = "p1")  %>%
+  tab_header(
+    title = md("Pairwise-Fst - *Full Dataset*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 5
+  )
+
+qro_qil_neutral_snpR_pwfst[["fst.matrix"]][["GeneticPopulation"]] |>
+  gt(rowname_col = "p1") |>
+  tab_header(
+    title = md("Pairwise-Fst - *Neutral Datase*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  )
+```
+
+### Landscape_Level_2
+
+```{r}
+#| code-fold: true
+BOM_full_snpR_pwfst[["fst.matrix"]][["Landscape_Level_2"]]  %>%
+  gt(rowname_col = "p1")  %>%
+  tab_header(
+    title = md("Pairwise-Fst - *Full Dataset*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 5
+  )
+
+qro_qil_neutral_snpR_pwfst[["fst.matrix"]][["GeneticPopulation"]] |>
+  gt(rowname_col = "p1") |>
+  tab_header(
+    title = md("Pairwise-Fst - *Neutral Datase*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  )
+```
+
+### Sampling Location
+
+```{r}
+#| code-fold: true
+#| fig-width: 20
+#| fig-height: 9
+# Full Dataset
+plot_pairwise_fst_heatmap(
+  BOM_full_snpR,
+  facets = "SamplingLocation"
+  )
+
+ggsave("01_results/BOM/BOM_pairwisefst_heatmap_full_dataset.png", width = 20, height = 10)
+
+# Neutral Dataset
+plot_pairwise_fst_heatmap(
+  qro_qil_neutral_snpR,
+  facets = "SamplingLocation"
+  )
+
+ggsave("2_results/qro_qil_pairwisefst_heatmap_neutral_dataset.png", width = 20, height = 20)
+```
+
+:::
+
+## Isolation by Distance
+
+### Extract IBD results
+
+```{r}
+#| cache-lazy: false
+BOM_full_IBD <- 
+  get.snpR.stats(
+  BOM_full_snpR,
+  "SamplingLocation",
+  "ibd"
+  )
+  
+qro_qil_neutral_IBD <- 
+  get.snpR.stats(
+  qro_qil_neutral_snpR,
+  "SamplingLocation",
+  "ibd"
+  )
+```
+
+### Check Mantel Test results
+
+```{r}
+# Full Dataset
+BOM_full_IBD
+plot(BOM_full_IBD[["SamplingLocation"]][[".base"]][["Edwards"]])
+  
+# Neutral Dataset  
+qro_qil_neutral_IBD
+plot(qro_qil_neutral_IBD[["SamplingLocation"]][[".base"]][["Edwards"]])
+```
+
+### Extract Genetic Distances
+
+```{r}
+BOM_full_GD <-
+  get.snpR.stats(
+   BOM_full_snpR, 
+    facets = "SamplingLocation",
+    stats = "genetic_distance"
+  )
+  
+qro_qil_neutral_GD <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR, 
+    facets = "SamplingLocation",
+    stats = "genetic_distance"
+  )
+```
+
+### Extract Geographical Distances
+
+```{r}
+BOM_full_GEO <-
+  get.snpR.stats(
+    BOM_full_snpR, 
+    facets = "SamplingLocation",
+    stats = "geo_dist"
+  )
+  
+qro_qil_neutral_GEO <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR, 
+    facets = "SamplingLocation",
+    stats = "geo_dist"
+  )
+```
+
+### Plot Genetic x Geographical Distance
+
+```{r}
+  #| code-fold: true
+
+mantel_r <- 0.185
+mantel_p <- 0.2637
+
+mantel_label <- paste0(
+  "Mantel r = ", mantel_r, "\n",
+  "p = ", mantel_p
+)
+
+p_ibd <- left_join(
+  metagMisc::dist2list(BOM_full_GD$SamplingLocation$.base$Edwards),
+  metagMisc::dist2list(BOM_full_GEO$SamplingLocation$Edwards),
+  by = c("col", "row"),
+  suffix = c(".GD", ".GEO")
+) %>%
+  ggplot(aes(x = value.GEO, y = value.GD)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("Geographical Distance") +
+  ylab("Genetic Distance (Edwards)") +
+  theme_minimal() +
+  annotate(
+    "text",
+    x = Inf, y = Inf,
+    label = mantel_label,
+    hjust = 1.1, vjust = 1.2,
+    size = 4
+  )
+
+ggsave("01_results/BOM/BOM_ibd_full_dataset.png", bg = "white")
+  
+left_join(
+  metagMisc::dist2list(qro_qil_neutral_GD$SamplingLocation$.base$Edwards),
+  metagMisc::dist2list(qro_qil_neutral_GEO$SamplingLocation$Edwards),
+  by = c("col", "row"), 
+  suffix = c(".GD", ".GEO") 
+  ) |> 
+  ggplot(
+    aes(x = value.GEO, y = value.GD)
+  ) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("Geographical Distance") +
+  ylab("Genetic Distance (Edwards)") +
+  #ggtitle("Isolation by Distance - Neutral Dataset") +
+  theme_minimal()
+
+ggsave("2_results/qro_qil_ibd_neutral_dataset.png", bg = "white")
+```
+
+# Citations
+
+```{r}
+citations(BOM_full_snpR)
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+# **LASIOGLOSSUM MALACHURUM**
+
+# Read and format input data
+
+## Read VCF datasets with package `vcfR`
+
+```{r}
+# Full dataset
+LGL_full_vcf <-
+  read.vcfR(
+    "/mnt/data2/Project_Polli_agro/Operational/4_data_analysis/01_snpcall/04_BCFtools/LML_stk_rm_assafora_minDP5_minGQ30_bi_mac02_meanDP10-100_maxmiss20_thinned300bp.vcf.gz"
+  )
+
+# Neutral dataset
+qro_qil_neutral_vcf <-
+  read.vcfR(
+    "0_input/QRO_ipr_v2_2_mm80_minmaxdp10100_bi_center_putative_neutral_SNPs.vcf.gz"
+  )
+```
+
+## Input the metadata file
+
+```{r}
+# read CSV with metadata
+LGL_metadata <- read_csv("/mnt/data2/Project_Polli_agro/Operational/2_metadata/02_SSF_samples/00_sampling_metadata/LGL_metadata_complete.csv") %>%
+  rename(
+    Sample = sample,
+    Landscape_Level_1 = landscape_level_1,
+    Landscape_Level_2 = landscape_level_2,
+    SamplingLocation = location,
+    Latitude = LAT,
+    Longitude = LONG
+  )
+
+# calculate mean coordinates for each sampling location
+LGL_coords_summary <- LGL_metadata %>%
+  group_by(SamplingLocation) %>%
+  summarise(
+    MeanLatitude = mean(Latitude),
+    MeanLongitude = mean(Longitude),
+    .groups = "drop"
+  )
+
+# join mean coordinates back to main data
+LGL_metadata <- LGL_metadata %>%
+  left_join(LGL_coords_summary, by = "SamplingLocation")  %>%
+  select(Sample, Landscape_Level_1, Landscape_Level_2, SamplingLocation, MeanLatitude, MeanLongitude)  %>%
+  distinct()
+```
+
+```{r}
+#| echo: False
+rmarkdown::paged_table(LGL_metadata)
+```
+
+## Convert datasets from `vcfR` to `snpR` 
+
+Use the function `snpR::convert_vcfR`, adding the genetic population information
+
+```{r}
+# Full dataset
+LGL_full_snpR <-
+  convert_vcfR(
+    LGL_full_vcf,
+    sample.meta = LGL_metadata
+  )
+
+# Neutral dataset
+qro_qil_neutral_snpR <-
+  convert_vcfR(
+    qro_qil_neutral_vcf,
+    sample.meta = popfile
+  )
+```
+
+### Check general dataset information
+
+```{r}
+nsnps(LGL_full_snpR)
+nsamps(LGL_full_snpR)
+
+nsnps(qro_qil_neutral_snpR)
+nsamps(qro_qil_neutral_snpR)
+```
+
+```{r}
+summarize_facets(LGL_full_snpR)
+summarize_facets(LGL_full_snpR, "Landscape_Level_1")
+summarize_facets(LGL_full_snpR, "Landscape_Level_2")
+summarize_facets(LGL_full_snpR, "SamplingLocation")
+
+summarize_facets(qro_qil_neutral_snpR)
+summarize_facets(qro_qil_neutral_snpR, "Species")
+summarize_facets(qro_qil_neutral_snpR, "GeneticPopulation")
+summarize_facets(qro_qil_neutral_snpR, "SamplingLocation")
+```
+
+# PCA
+
+## Run PCA
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+LGL_full_pca <-
+  plot_clusters(
+    LGL_full_snpR,
+    facets = "Landscape_Level_1.SamplingLocation",
+    alt.palette = viridisLite::turbo(13)
+  )
+
+qro_qil_neutral_pca <-
+  plot_clusters(
+    qro_qil_neutral_snpR,
+    facets = "GeneticPopulation.SamplingLocation",
+    alt.palette = viridisLite::turbo(18)
+  )
+```
+
+## Plot PCA
+
+```{r}
+# Full Dataset
+LGL_full_pca$plots$pca |> ggplotly()
+
+# Neutral Dataset
+qro_qil_neutral_pca$plots$pca |> ggplotly()
+```
+
+# Calculate SnpR Stats
+
+## Calculate summary statistics
+
+```{r}
+#| cache-lazy: false
+
+LGL_full_snpR <-
+  calc_snpR_gendiv(
+    LGL_full_snpR,
+    c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation")
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_snpR_gendiv(
+    qro_qil_neutral_snpR,
+    c("Species", "GeneticPopulation", "SamplingLocation")
+  )
+```
+
+## Calculate Isolation-by-Distance
+
+```{r}
+#| cache-lazy: false
+LGL_full_snpR <-
+  calc_isolation_by_distance(
+    LGL_full_snpR,
+    x_y = c("MeanLongitude", "MeanLatitude"),
+    facets = "SamplingLocation",
+    nrepet = 9999
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_isolation_by_distance(
+    qro_qil_neutral_snpR,
+    x_y = c("MeanLongitude", "MeanLatitude"),
+    facets = "SamplingLocation",
+    nrepet = 9999
+  )
+```
+
+## Calculate Genetic Distances
+
+```{r}
+#| cache-lazy: false
+LGL_full_snpR <-
+  calc_genetic_distances(
+    LGL_full_snpR,
+    facets = "SamplingLocation"
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR <-
+  calc_genetic_distances(
+    qro_qil_neutral_snpR,
+    facets = "SamplingLocation"
+  )
+```
+
+# Analyze Results
+
+## Genetic Diversity
+
+Retrieve genetic diversity statistics.
+
+```{r}
+#| cache-lazy: false
+LGL_full_snpR_gendiv <-
+  get.snpR.stats(
+    LGL_full_snpR,
+    facets = c("Landscape_Level_1",  "Landscape_Level_2", "SamplingLocation"),
+    stats = c(
+      "ho", "he", "pi", "private", "seg_sites", "prop_poly", "hs",
+      "allelic_richness", "fis"
+    )
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR_gendiv <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR,
+    facets = c("GeneticPopulation", "SamplingLocation", "Species"),
+    stats = c(
+      "ho", "he", "hwe", "pi", "private", "seg_sites", "prop_poly", "hs",
+      "allelic_richness", "fis"
+    )
+  )
+```
+
+Genetic diversity statistics for both datasets are represented in the following tables:
+
+::: {.panel-tabset}
+
+### Landscape_Level_1
+
+```{r}
+#| code-fold: true
+LGL_gendiv_genpop_gt <- 
+  bind_rows(
+    LGL_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "Landscape_Level_1")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *Landscape_Level_1*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+LGL_gendiv_genpop_gt
+
+gtsave(LGL_gendiv_genpop_gt, "01_results/LGL/LGL_gendiv_genpop_table_SSF_LoA.docx")
+```
+
+### Landscape_Level_2
+
+```{r}
+#| code-fold: true
+LGL_gendiv_genpop_2_gt <- 
+  bind_rows(
+    LGL_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "Landscape_Level_2")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *Landscape Level 2*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+LGL_gendiv_genpop_2_gt
+
+gtsave(LGL_gendiv_genpop_2_gt, "01_results/LGL/LGL_gendiv_genpop_2_table_SSF_LoA_N_LoA_F.docx")
+```
+
+### Sampling Location
+
+```{r}
+#| code-fold: true
+LGL_gendiv_genpop_sampling_gt <- 
+  bind_rows(
+    LGL_full_snpR_gendiv$weighted.means %>%
+      filter(facet == "SamplingLocation")
+      #mutate(dataset = "Full Dataset"),
+    #qro_qil_neutral_snpR_gendiv$weighted.means |>
+      #filter(facet == "GeneticPopulation") |>
+      #mutate(dataset = "Neutral Dataset")
+    )  %>%
+  select(-facet, -snp.facet, -snp.subfacet, -seg_sites_var)  %>%
+  rename_with(
+    ~ c(
+      "subfacet", "Ho", "He", "Pi", "Seg. Sites", "Priv. Alleles", "Hs",
+      "Prop. Poly.", "All. Richness", "Fis"
+    ),
+    everything()
+    )  %>%
+  gt(
+    groupname_col = "dataset",
+    rowname_col = "subfacet"
+    )  %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+    )  %>%
+  tab_style(
+    cell_fill(color = "lightgray"),
+    locations = cells_row_groups()
+    )  %>%
+  tab_header(
+    title = md("Genetic Diversity Statistics - *SamplingLocation*")
+    )  %>%
+  tab_footnote(
+    footnote = "Table shows wheighted mean values of Ho, He, Pi, Hs, Allelic Richness and Fis."
+    )
+
+LGL_gendiv_genpop_sampling_gt
+
+gtsave(LGL_gendiv_genpop_sampling_gt, "01_results/LGL/LGL_gendiv_genpop_sampling_table.docx")
+```
+:::
+
+## Differentiation
+
+Retrieve pairwise-Fst stats for both datasets.
+
+```{r}
+#| cache-lazy: false
+#| 
+# Compute FST statistics
+LGL_full_snpR <- calc_pairwise_fst(
+  LGL_full_snpR,
+  facets = c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation")
+)
+
+LGL_full_snpR_pwfst <-
+  get.snpR.stats(
+    LGL_full_snpR,
+    facets = c("Landscape_Level_1", "Landscape_Level_2", "SamplingLocation"),
+    stats = "fst"
+  )
+```
+
+```{r}
+qro_qil_neutral_snpR_pwfst <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR,
+    facets = c("Species", "GeneticPopulation", "SamplingLocation"),
+    stats = "fst"
+  )
+```
+
+Plot pairwise-Fst between species, genetic populations, and sampling locations, for both datasets.
+
+::: {.panel-tabset}
+
+### Landscape_Level_1
+
+```{r}
+#| code-fold: true
+LGL_full_snpR_pwfst[["fst.matrix"]][["Landscape_Level_1"]]  %>%
+  gt(rowname_col = "p1")  %>%
+  tab_header(
+    title = md("Pairwise-Fst - *Full Dataset*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 5
+  )
+
+qro_qil_neutral_snpR_pwfst[["fst.matrix"]][["GeneticPopulation"]] |>
+  gt(rowname_col = "p1") |>
+  tab_header(
+    title = md("Pairwise-Fst - *Neutral Datase*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  )
+```
+
+### Landscape_Level_2
+
+```{r}
+#| code-fold: true
+LGL_full_snpR_pwfst[["fst.matrix"]][["Landscape_Level_2"]]  %>%
+  gt(rowname_col = "p1")  %>%
+  tab_header(
+    title = md("Pairwise-Fst - *Full Dataset*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 5
+  )
+
+qro_qil_neutral_snpR_pwfst[["fst.matrix"]][["GeneticPopulation"]] |>
+  gt(rowname_col = "p1") |>
+  tab_header(
+    title = md("Pairwise-Fst - *Neutral Datase*")
+  ) |>
+  fmt_number(
+    columns = everything(),
+    decimals = 3
+  )
+```
+
+### Sampling Location
+
+```{r}
+#| code-fold: true
+#| fig-width: 20
+#| fig-height: 9
+# Full Dataset
+plot_pairwise_fst_heatmap(
+  LGL_full_snpR,
+  facets = "SamplingLocation"
+  )
+
+ggsave("01_results/LGL/LGL_pairwisefst_heatmap_full_dataset.png", width = 20, height = 10)
+
+# Neutral Dataset
+plot_pairwise_fst_heatmap(
+  qro_qil_neutral_snpR,
+  facets = "SamplingLocation"
+  )
+
+ggsave("2_results/qro_qil_pairwisefst_heatmap_neutral_dataset.png", width = 20, height = 20)
+```
+
+:::
+
+## Isolation by Distance
+
+### Extract IBD results
+
+```{r}
+#| cache-lazy: false
+LGL_full_IBD <- 
+  get.snpR.stats(
+  LGL_full_snpR,
+  "SamplingLocation",
+  "ibd"
+  )
+  
+qro_qil_neutral_IBD <- 
+  get.snpR.stats(
+  qro_qil_neutral_snpR,
+  "SamplingLocation",
+  "ibd"
+  )
+```
+
+### Check Mantel Test results
+
+```{r}
+# Full Dataset
+LGL_full_IBD
+plot(LGL_full_IBD[["SamplingLocation"]][[".base"]][["Edwards"]])
+  
+# Neutral Dataset  
+qro_qil_neutral_IBD
+plot(qro_qil_neutral_IBD[["SamplingLocation"]][[".base"]][["Edwards"]])
+```
+
+### Extract Genetic Distances
+
+```{r}
+LGL_full_GD <-
+  get.snpR.stats(
+   LGL_full_snpR, 
+    facets = "SamplingLocation",
+    stats = "genetic_distance"
+  )
+  
+qro_qil_neutral_GD <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR, 
+    facets = "SamplingLocation",
+    stats = "genetic_distance"
+  )
+```
+
+### Extract Geographical Distances
+
+```{r}
+LGL_full_GEO <-
+  get.snpR.stats(
+    LGL_full_snpR, 
+    facets = "SamplingLocation",
+    stats = "geo_dist"
+  )
+  
+qro_qil_neutral_GEO <-
+  get.snpR.stats(
+    qro_qil_neutral_snpR, 
+    facets = "SamplingLocation",
+    stats = "geo_dist"
+  )
+```
+
+### Plot Genetic x Geographical Distance
+
+```{r}
+  #| code-fold: true
+
+mantel_r <- -0.2306
+mantel_p <- 0.7949
+
+mantel_label <- paste0(
+  "Mantel r = ", mantel_r, "\n",
+  "p = ", mantel_p
+)
+
+p_ibd <- left_join(
+  metagMisc::dist2list(LGL_full_GD$SamplingLocation$.base$Edwards),
+  metagMisc::dist2list(LGL_full_GEO$SamplingLocation$Edwards),
+  by = c("col", "row"),
+  suffix = c(".GD", ".GEO")
+) %>%
+  ggplot(aes(x = value.GEO, y = value.GD)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("Geographical Distance") +
+  ylab("Genetic Distance (Edwards)") +
+  theme_minimal() +
+  annotate(
+    "text",
+    x = Inf, y = Inf,
+    label = mantel_label,
+    hjust = 1.1, vjust = 1.2,
+    size = 4
+  )
+
+ggsave("01_results/LGL/LGL_ibd_full_dataset.png", bg = "white")
+  
+left_join(
+  metagMisc::dist2list(qro_qil_neutral_GD$SamplingLocation$.base$Edwards),
+  metagMisc::dist2list(qro_qil_neutral_GEO$SamplingLocation$Edwards),
+  by = c("col", "row"), 
+  suffix = c(".GD", ".GEO") 
+  ) |> 
+  ggplot(
+    aes(x = value.GEO, y = value.GD)
+  ) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("Geographical Distance") +
+  ylab("Genetic Distance (Edwards)") +
+  #ggtitle("Isolation by Distance - Neutral Dataset") +
+  theme_minimal()
+
+ggsave("2_results/qro_qil_ibd_neutral_dataset.png", bg = "white")
+```
+
+# Citations
+
+```{r}
+citations(LGL_full_snpR)
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
